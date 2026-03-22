@@ -1,0 +1,31 @@
+# .NET build output
+bin/
+obj/
+
+# BC Artifacts (large, downloaded separately)
+artifacts/
+
+# AL packages
+.alpackages/
+
+# Compiled .app output
+**/output/*.app
+**/output/*.symbols.app
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*.tmp
+*.swp
+
+# Claude Code
+.claude/
+.snapshots/

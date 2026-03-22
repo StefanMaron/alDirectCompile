@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Allow unsafe code if needed by Nav runtime -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <ServiceTierPath>../artifacts/onprem/27.5.46862.0/platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/270/Service</ServiceTierPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Core runtime - contains NavCodeunit, NavMethodScope, NavRuntimeHelpers, ALCompiler, etc. -->
+    <Reference Include="Microsoft.Dynamics.Nav.Ncl">
+      <HintPath>$(ServiceTierPath)/Microsoft.Dynamics.Nav.Ncl.dll</HintPath>
+    </Reference>
+    <!-- Types - contains Decimal18, NavText, ByRef, NavType, etc. -->
+    <Reference Include="Microsoft.Dynamics.Nav.Types">
+      <HintPath>$(ServiceTierPath)/Microsoft.Dynamics.Nav.Types.dll</HintPath>
+    </Reference>
+    <!-- Common - contains Language namespace -->
+    <Reference Include="Microsoft.Dynamics.Nav.Common">
+      <HintPath>$(ServiceTierPath)/Microsoft.Dynamics.Nav.Common.dll</HintPath>
+    </Reference>
+    <!-- Language support -->
+    <Reference Include="Microsoft.Dynamics.Nav.Language">
+      <HintPath>$(ServiceTierPath)/Microsoft.Dynamics.Nav.Language.dll</HintPath>
+    </Reference>
+    <!-- Core runtime types -->
+    <Reference Include="Microsoft.Dynamics.Nav.Core">
+      <HintPath>$(ServiceTierPath)/Microsoft.Dynamics.Nav.Core.dll</HintPath>
+    </Reference>
+    <!-- Report types (referenced by NavMethodScope potentially) -->
+    <Reference Include="Microsoft.Dynamics.Nav.Types.Report">
+      <HintPath>$(ServiceTierPath)/Microsoft.Dynamics.Nav.Types.Report.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Dynamics.Nav.Types.Report.Base">
+      <HintPath>$(ServiceTierPath)/Microsoft.Dynamics.Nav.Types.Report.Base.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Dynamics.Nav.Types.Report.Runtime">
+      <HintPath>$(ServiceTierPath)/Microsoft.Dynamics.Nav.Types.Report.Runtime.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>
