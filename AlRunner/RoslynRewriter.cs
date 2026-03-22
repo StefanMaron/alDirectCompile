@@ -1309,6 +1309,32 @@ public void CheckType(NavType actual, NavType expected) { }
                 }
             }
 
+            // ALSystemString.ALLowercase(x) -> (x?.ToLowerInvariant() ?? "")
+            // ALSystemString.ALUppercase(x) -> (x?.ToUpperInvariant() ?? "")
+            // These BC runtime methods access NavEnvironment for CultureInfo, crashing on Linux.
+            if (exprText == "ALSystemString" && (methodName == "ALLowercase" || methodName == "ALUppercase"))
+            {
+                var args = visited.ArgumentList.Arguments;
+                if (args.Count == 1)
+                {
+                    var netMethod = methodName == "ALLowercase" ? "ToLowerInvariant" : "ToUpperInvariant";
+                    // Build: (x?.ToLowerInvariant() ?? "")
+                    var arg = args[0].Expression;
+                    var nullCoalesce = SyntaxFactory.ParenthesizedExpression(
+                        SyntaxFactory.BinaryExpression(
+                            SyntaxKind.CoalesceExpression,
+                            SyntaxFactory.ConditionalAccessExpression(
+                                arg,
+                                SyntaxFactory.InvocationExpression(
+                                    SyntaxFactory.MemberBindingExpression(
+                                        SyntaxFactory.IdentifierName(netMethod)))),
+                            SyntaxFactory.LiteralExpression(
+                                SyntaxKind.StringLiteralExpression,
+                                SyntaxFactory.Literal(""))));
+                    return nullCoalesce;
+                }
+            }
+
             // ALSystemDate.ALWorkDate(null!) -> ALSystemDate.ALWorkDate(NavDate.Default)
             // The rewriter turns this.Session -> null!, which makes ALWorkDate ambiguous between
             // the NavSession and NavDate overloads. We disambiguate to the NavDate overload.
