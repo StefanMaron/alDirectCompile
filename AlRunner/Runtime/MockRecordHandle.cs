@@ -95,7 +95,16 @@ public class MockRecordHandle
     {
         var table = _tables[_tableId];
         var row = new Dictionary<int, NavValue>(_fields);
+        // Auto-assign unique MediaIds for any NavMedia fields that are still at default
+        foreach (var key in row.Keys.ToList())
+        {
+            if (row[key] is NavMedia media && !media.ALHasValue)
+                row[key] = new NavMedia(Guid.NewGuid());
+        }
         table.Add(row);
+        // Sync cursor fields with what was stored (so MediaId reads work)
+        foreach (var kv in row)
+            _fields[kv.Key] = kv.Value;
         return true;
     }
 
@@ -278,6 +287,12 @@ public class MockRecordHandle
         };
     }
 
+    /// <summary>Clear filter for this field (AL: SETRANGE(FieldNo) with no value).</summary>
+    public void ALSetRangeSafe(int fieldNo, NavType expectedType)
+    {
+        _filters.Remove(fieldNo);
+    }
+
     public void ALSetRangeSafe(int fieldNo, NavType expectedType, NavValue value)
     {
         // Single value = equality filter (from == to)
@@ -356,8 +371,19 @@ public class MockRecordHandle
     /// AL's FILTERGROUP — sets the filter group for subsequent filter operations.
     /// In BC, filter groups isolate filters. In standalone mode, this is a no-op
     /// since we don't track filter groups.
+    /// Exposed as a property so the transpiler can emit both method-call and assignment forms:
+    ///   rec.ALFilterGroup(2)   → method call (via the method overload below)
+    ///   rec.ALFilterGroup = 2  → property setter
     /// </summary>
-    public void ALFilterGroup(int groupId)
+    public int ALFilterGroup
+    {
+        get => _filterGroup;
+        set { /* No-op: filter groups not implemented in standalone mode */ }
+    }
+    private int _filterGroup;
+
+    /// <summary>Method overload for ALFilterGroup(int) call syntax.</summary>
+    public void SetALFilterGroup(int groupId)
     {
         // No-op: filter groups not implemented in standalone mode
     }
@@ -423,6 +449,18 @@ public class MockRecordHandle
     // -----------------------------------------------------------------------
     // TestField — asserts field has expected value
     // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// AL's TESTFIELD(FieldNo) — asserts the field is non-empty/non-default (Safe variant).
+    /// </summary>
+    public void ALTestFieldSafe(int fieldNo, NavType expectedType)
+    {
+        var actual = GetFieldValueSafe(fieldNo, expectedType);
+        var actualStr = NavValueToString(actual);
+        var defaultStr = NavValueToString(DefaultForType(expectedType));
+        if (actualStr == defaultStr)
+            throw new Exception($"TestField failed: field {fieldNo} in table {_tableId} must have a value");
+    }
 
     /// <summary>
     /// AL's TESTFIELD(FieldNo, Value) — asserts the field equals the expected value.
@@ -518,6 +556,17 @@ public class MockRecordHandle
         // No-op: no SQL transaction isolation needed
     }
 
+    /// <summary>
+    /// AL's READISOLATION — sets read isolation level for the record.
+    /// No-op in standalone mode since there's no SQL transaction.
+    /// Uses object type to accept ALIsolationLevel enum without direct dependency.
+    /// </summary>
+    public object ALReadIsolation
+    {
+        get => 0;
+        set { /* No-op */ }
+    }
+
     // -----------------------------------------------------------------------
     // Copy — copies field values and filters from another record handle
     // -----------------------------------------------------------------------
@@ -540,6 +589,46 @@ public class MockRecordHandle
             foreach (var kv in source._filters)
                 _filters[kv.Key] = kv.Value;
         }
+    }
+
+    /// <summary>
+    /// AL's COPYFILTER(fromFieldNo, toRecord, toFieldNo) — copies the filter from one field
+    /// on this record to a field on another record.
+    /// </summary>
+    public void ALCopyFilter(int fromFieldNo, MockRecordHandle target, int toFieldNo)
+    {
+        if (_filters.TryGetValue(fromFieldNo, out var filter))
+        {
+            target._filters[toFieldNo] = new FieldFilter
+            {
+                FieldNo = toFieldNo,
+                FromValue = filter.FromValue,
+                ToValue = filter.ToValue,
+                FilterExpression = filter.FilterExpression,
+                IsRangeFilter = filter.IsRangeFilter,
+            };
+        }
+        else
+        {
+            target._filters.Remove(toFieldNo);
+        }
+    }
+
+    /// <summary>
+    /// AL's COPYFILTERS(fromRecord) — copies all filters from the source record.
+    /// </summary>
+    public void ALCopyFilters(MockRecordHandle source)
+    {
+        _filters.Clear();
+        foreach (var kv in source._filters)
+            _filters[kv.Key] = new FieldFilter
+            {
+                FieldNo = kv.Key,
+                FromValue = kv.Value.FromValue,
+                ToValue = kv.Value.ToValue,
+                FilterExpression = kv.Value.FilterExpression,
+                IsRangeFilter = kv.Value.IsRangeFilter,
+            };
     }
 
     // -----------------------------------------------------------------------
@@ -916,9 +1005,45 @@ public class MockRecordHandle
             NavType.Text => NavText.Default(0),
             NavType.Code => new NavCode(20, ""),
             NavType.Boolean => NavBoolean.Default,
+            NavType.Media => NavMedia.Default,
+            NavType.MediaSet => NavMediaSet.Default,
             _ => NavText.Default(0)
         };
     }
+
+    /// <summary>
+    /// AL's TRANSFERFIELDS — copies field values from another record.
+    /// In standalone mode, copies all fields from source to this record.
+    /// </summary>
+    public void ALTransferFields(MockRecordHandle source, bool initPrimaryKey = true)
+    {
+        foreach (var kv in source._fields)
+        {
+            if (!initPrimaryKey && kv.Key == 1) continue; // skip PK field
+            _fields[kv.Key] = kv.Value;
+        }
+    }
+
+    /// <summary>
+    /// AL's MARK — marks or unmarks the current record.
+    /// In standalone mode, no-op (marking is used for filtered iteration).
+    /// </summary>
+    public void ALMark(bool mark = true)
+    {
+        // No-op: record marking not implemented in standalone mode
+    }
+
+    /// <summary>
+    /// AL's MARKEDONLY — sets/gets whether to only iterate over marked records.
+    /// Exposed as both a property (for assignment: rec.ALMarkedOnly = true) and a method.
+    /// In standalone mode, no-op.
+    /// </summary>
+    public bool ALMarkedOnly
+    {
+        get => _markedOnly;
+        set { /* No-op: record marking not implemented in standalone mode */ }
+    }
+    private bool _markedOnly;
 
     /// <summary>
     /// AL SetAutoCalcFields — stub, no-op in standalone mode.
@@ -944,6 +1069,34 @@ public class MockRecordHandle
     public string ALGetFilter(int fieldNo)
     {
         return "";
+    }
+
+    /// <summary>
+    /// AL GetFilters — returns all active filters as a single string.
+    /// </summary>
+    public string ALGetFilters()
+    {
+        return "";
+    }
+
+    /// <summary>
+    /// AL's GETRANGEMIN — returns the minimum value of the filter range for a field.
+    /// </summary>
+    public NavValue ALGetRangeMinSafe(int fieldNo, NavType expectedType)
+    {
+        if (_filters.TryGetValue(fieldNo, out var filter) && filter.FromValue != null)
+            return filter.FromValue;
+        return DefaultForType(expectedType);
+    }
+
+    /// <summary>
+    /// AL's GETRANGEMAX — returns the maximum value of the filter range for a field.
+    /// </summary>
+    public NavValue ALGetRangeMaxSafe(int fieldNo, NavType expectedType)
+    {
+        if (_filters.TryGetValue(fieldNo, out var filter) && filter.ToValue != null)
+            return filter.ToValue;
+        return DefaultForType(expectedType);
     }
 
     /// <summary>

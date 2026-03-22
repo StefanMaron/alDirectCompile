@@ -1,6 +1,8 @@
 namespace AlRunner.Runtime;
 
 using System.Reflection;
+using Microsoft.Dynamics.Nav.Runtime;
+using Microsoft.Dynamics.Nav.Types;
 
 /// <summary>
 /// Routes cross-codeunit method calls to generated codeunit classes.
@@ -112,8 +114,43 @@ public class MockCodeunitHandle
             }
         }
 
+        // Fallback: no exact member ID match. Try matching by argument count across all
+        // public methods. This handles the case where test code was compiled against
+        // Variant-based signatures (like Assert.AreEqual(Variant,Variant,Text)) but the
+        // stub has type-specific overloads with different member IDs.
+        var candidateMethods = codeunitType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Where(m => m.GetParameters().Length == args.Length && !m.IsSpecialName)
+            .ToList();
+
+        if (candidateMethods.Count > 0)
+        {
+            // Prefer the method whose parameters best match the actual argument types
+            var bestMethod = candidateMethods
+                .OrderByDescending(m => ScoreMethodMatch(m, args))
+                .First();
+
+            var parameters = bestMethod.GetParameters();
+            var convertedArgs = new object?[parameters.Length];
+            for (int i = 0; i < parameters.Length; i++)
+            {
+                if (i < args.Length)
+                    convertedArgs[i] = ConvertArg(args[i], parameters[i].ParameterType);
+            }
+            return bestMethod.Invoke(_codeunitInstance, convertedArgs);
+        }
+
         throw new InvalidOperationException(
             $"Method with member ID {memberId} not found in codeunit {_codeunitId}");
+    }
+
+    /// <summary>
+    /// Instance method: run the codeunit's OnRun trigger.
+    /// Replacement for NavCodeunitHandle.Target.Run(DataError, record).
+    /// In BC, this runs the codeunit passing a record parameter.
+    /// </summary>
+    public void Run(DataError errorLevel, object? record = null)
+    {
+        RunCodeunit(_codeunitId);
     }
 
     /// <summary>
@@ -157,6 +194,39 @@ public class MockCodeunitHandle
     {
         var expectedName = $"Codeunit{_codeunitId}";
         return assembly.GetTypes().FirstOrDefault(t => t.Name == expectedName);
+    }
+
+    /// <summary>
+    /// Scores how well a method's parameter types match the actual argument types.
+    /// Higher score = better match. Used for fallback method resolution when exact
+    /// member ID matching fails (e.g., Variant-based signatures in test code vs
+    /// type-specific overloads in stub code).
+    /// Unwraps MockVariant to check the underlying value's type.
+    /// </summary>
+    private static int ScoreMethodMatch(MethodInfo method, object[] args)
+    {
+        int score = 0;
+        var parameters = method.GetParameters();
+        for (int i = 0; i < parameters.Length && i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (arg == null) continue;
+
+            // Unwrap MockVariant to get the actual underlying value
+            if (arg is MockVariant mv && mv.Value != null)
+                arg = mv.Value;
+
+            var argType = arg.GetType();
+            var paramType = parameters[i].ParameterType;
+
+            if (paramType.IsAssignableFrom(argType))
+                score += 10; // exact or inherited match
+            else if (paramType == typeof(object))
+                score += 5; // object accepts anything
+            else
+                score += 1; // may be convertible
+        }
+        return score;
     }
 
     private static object? ConvertArg(object? arg, Type targetType)
@@ -206,6 +276,38 @@ public class MockCodeunitHandle
             var defaultCtor = targetType.GetConstructor(Type.EmptyTypes);
             if (defaultCtor != null)
                 return defaultCtor.Invoke(null);
+        }
+
+        // string -> NavText conversion
+        if (targetType.Name == "NavText" && arg is string strVal)
+        {
+            var ctor = targetType.GetConstructor(new[] { typeof(string) });
+            if (ctor != null)
+                return ctor.Invoke(new object[] { strVal });
+            var ctorWithLen = targetType.GetConstructor(new[] { typeof(int), typeof(string) });
+            if (ctorWithLen != null)
+                return ctorWithLen.Invoke(new object[] { 250, strVal });
+        }
+
+        // NavText -> string conversion (when target is string)
+        if (targetType == typeof(string) && arg is NavValue navVal)
+        {
+            return navVal.ToString();
+        }
+
+        // NavValue -> primitive conversions (for comparing NavText/NavOption/NavBoolean with primitives)
+        if (arg is NavValue)
+        {
+            if (targetType == typeof(int))
+            {
+                var toInt = arg.GetType().GetMethod("ToInt32", Type.EmptyTypes);
+                if (toInt != null) return toInt.Invoke(arg, null);
+            }
+            if (targetType == typeof(bool))
+            {
+                var toBool = arg.GetType().GetMethod("ToBoolean", Type.EmptyTypes);
+                if (toBool != null) return toBool.Invoke(arg, null);
+            }
         }
 
         // Try general conversion

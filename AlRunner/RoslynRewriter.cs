@@ -42,6 +42,9 @@ public class RoslynRewriter : CSharpSyntaxRewriter
         "ALGetTable", // NavRecordRef.ALGetTable(NavRecord) — record assertion methods only
         "ALClose",    // NavRecordRef.ALClose()
         "RunEvent",   // NavEventScope.RunEvent() — event subscriber dispatch, no-op standalone
+        "ALCommit",   // ALDatabase.ALCommit() — SQL transaction commit, no-op standalone
+        "ALCommit",   // ALDatabase.ALCommit() — transaction commit, no-op standalone
+        "ALSelectLatestVersion", // ALDatabase.ALSelectLatestVersion() — no-op standalone
     };
 
     private static readonly HashSet<string> StripITreeObjectArgMethods = new(StringComparer.Ordinal)
@@ -79,9 +82,12 @@ public class RoslynRewriter : CSharpSyntaxRewriter
         "ALInit", "ALInsert", "ALModify", "ALGet", "ALFind", "ALNext", "ALDelete",
         "ALDeleteAll", "ALCount", "ALSetRange", "ALSetFilter", "ALFindSet",
         "ALFindFirst", "ALFindLast", "ALIsEmpty", "ALCalcFields", "ALSetCurrentKey",
-        "ALReset", "ALCopy", "ALTestField", "ALTestFieldSafe", "ALValidate", "ALValidateSafe", "ALRename",
+        "ALReset", "ALCopy", "ALCopyFilter", "ALCopyFilters", "ALTestField", "ALTestFieldSafe", "ALValidate", "ALValidateSafe", "ALRename",
         "ALLockTable", "ALCalcSums", "ALSetLoadFields", "ALFieldCaption", "ALSetRecFilter",
         "ALTableCaption", "ALTableName", "ALTestFieldNavValueSafe",
+        "ALFilterGroup", "ALSetRangeSafe", "ALReadIsolation",
+        "ALTransferFields", "ALMark", "ALMarkedOnly",
+        "ALGetFilters", "ALGetRangeMinSafe", "ALGetRangeMaxSafe",
         "SetFieldValueSafe", "GetFieldValueSafe", "GetFieldRefSafe",
     };
 
@@ -188,12 +194,18 @@ public class RoslynRewriter : CSharpSyntaxRewriter
         // Detect if this is a scope class BEFORE visiting children.
         // We need to know the enclosing class name for _parent field type.
         bool isScopeClass = false;
+        bool isRecordClass = false;
+        bool isPageClass = false;
         string? enclosingClassName = null;
         if (node.BaseList != null)
         {
             foreach (var baseType in node.BaseList.Types)
             {
                 var typeText = baseType.Type.ToString();
+                if (typeText == "NavRecord" || typeText == "NavRecordExtension")
+                    isRecordClass = true;
+                if (typeText == "NavForm" || typeText == "NavFormExtension")
+                    isPageClass = true;
                 if (typeText.StartsWith("NavMethodScope<") || typeText.StartsWith("NavTriggerMethodScope<")
                     || typeText.StartsWith("NavEventMethodScope<"))
                 {
@@ -273,6 +285,103 @@ public class RoslynRewriter : CSharpSyntaxRewriter
 
             // Insert the _parent field at the beginning
             visited = visited.WithMembers(visited.Members.Insert(0, parentField));
+        }
+
+        // For Record classes: add delegating methods that forward to Rec (MockRecordHandle).
+        // In the original code, Record2632 : NavRecord, so it inherits GetFieldValueSafe, ALModify, etc.
+        // After rewriting, the base class is removed and Rec is a separate MockRecordHandle property.
+        // Scope classes reference _parent.GetFieldValueSafe(...) which needs to work on the Record class.
+        if (isRecordClass)
+        {
+            var delegatingCode = @"
+public NavValue GetFieldValueSafe(int fieldNo, NavType expectedType) => Rec.GetFieldValueSafe(fieldNo, expectedType);
+public NavValue GetFieldValueSafe(int fieldNo, NavType expectedType, bool useLocale) => Rec.GetFieldValueSafe(fieldNo, expectedType, useLocale);
+public void SetFieldValueSafe(int fieldNo, NavType expectedType, NavValue value) => Rec.SetFieldValueSafe(fieldNo, expectedType, value);
+public void SetFieldValueSafe(int fieldNo, NavType expectedType, NavValue value, bool validate) => Rec.SetFieldValueSafe(fieldNo, expectedType, value, validate);
+public NavValue GetFieldRefSafe(int fieldNo, NavType expectedType) => Rec.GetFieldRefSafe(fieldNo, expectedType);
+public bool ALInsert(DataError errorLevel) => Rec.ALInsert(errorLevel);
+public bool ALInsert(DataError errorLevel, bool runTrigger) => Rec.ALInsert(errorLevel, runTrigger);
+public bool ALModify(DataError errorLevel) => Rec.ALModify(errorLevel);
+public bool ALModify(DataError errorLevel, bool runTrigger) => Rec.ALModify(errorLevel, runTrigger);
+public bool ALGet(DataError errorLevel, params NavValue[] keyValues) => Rec.ALGet(errorLevel, keyValues);
+public bool ALFind(DataError errorLevel, string searchMethod = ""-"") => Rec.ALFind(errorLevel, searchMethod);
+public bool ALFindSet(DataError errorLevel = DataError.ThrowError, bool forUpdate = false) => Rec.ALFindSet(errorLevel, forUpdate);
+public bool ALFindFirst(DataError errorLevel = DataError.ThrowError) => Rec.ALFindFirst(errorLevel);
+public bool ALFindLast(DataError errorLevel = DataError.ThrowError) => Rec.ALFindLast(errorLevel);
+public int ALNext() => Rec.ALNext();
+public bool ALDelete(DataError errorLevel, bool runTrigger = false) => Rec.ALDelete(errorLevel, runTrigger);
+public void ALDeleteAll(bool runTrigger) => Rec.ALDeleteAll(runTrigger);
+public void ALDeleteAll(DataError errorLevel = DataError.ThrowError, bool runTrigger = false) => Rec.ALDeleteAll(errorLevel, runTrigger);
+public void ALInit() => Rec.ALInit();
+public void ALReset() => Rec.ALReset();
+public void ALSetRange(int fieldNo, NavType expectedType, NavValue fromValue, NavValue toValue) => Rec.ALSetRange(fieldNo, expectedType, fromValue, toValue);
+public void ALSetRangeSafe(int fieldNo, NavType expectedType) => Rec.ALSetRangeSafe(fieldNo, expectedType);
+public void ALSetRangeSafe(int fieldNo, NavType expectedType, NavValue value) => Rec.ALSetRangeSafe(fieldNo, expectedType, value);
+public void ALSetRangeSafe(int fieldNo, NavType expectedType, NavValue fromValue, NavValue toValue) => Rec.ALSetRangeSafe(fieldNo, expectedType, fromValue, toValue);
+public void ALSetFilter(int fieldNo, string filterExpression, params NavValue[] args) => Rec.ALSetFilter(fieldNo, filterExpression, args);
+public void ALSetFilter(int fieldNo, NavType expectedType, string filterExpression, params NavValue[] args) => Rec.ALSetFilter(fieldNo, expectedType, filterExpression, args);
+public void ALCopy(MockRecordHandle source, bool shareFilters = false) => Rec.ALCopy(source, shareFilters);
+public void ALCopyFilter(int fromFieldNo, MockRecordHandle target, int toFieldNo) => Rec.ALCopyFilter(fromFieldNo, target, toFieldNo);
+public void ALCopyFilters(MockRecordHandle source) => Rec.ALCopyFilters(source);
+public void ALValidateSafe(int fieldNo, NavType expectedType, NavValue value) => Rec.ALValidateSafe(fieldNo, expectedType, value);
+public void ALValidate(DataError errorLevel, int fieldNo, NavType expectedType, NavValue value) => Rec.ALValidate(errorLevel, fieldNo, expectedType, value);
+public void ALTestFieldSafe(int fieldNo, NavType expectedType) => Rec.ALTestFieldSafe(fieldNo, expectedType);
+public void ALTestFieldSafe(int fieldNo, NavType expectedType, NavValue expectedValue) => Rec.ALTestFieldSafe(fieldNo, expectedType, expectedValue);
+public void ALTestField(DataError errorLevel, int fieldNo, NavType expectedType) => Rec.ALTestField(errorLevel, fieldNo, expectedType);
+public void ALTestField(DataError errorLevel, int fieldNo, NavType expectedType, NavValue expectedValue) => Rec.ALTestField(errorLevel, fieldNo, expectedType, expectedValue);
+public void ALCalcFields(DataError errorLevel, params int[] fieldNos) => Rec.ALCalcFields(errorLevel, fieldNos);
+public bool ALCalcSums(DataError errorLevel, params int[] fieldNos) => Rec.ALCalcSums(errorLevel, fieldNos);
+public void ALSetCurrentKey(DataError errorLevel, params int[] fieldNos) => Rec.ALSetCurrentKey(errorLevel, fieldNos);
+public void ALSetCurrentKey(params int[] fieldNos) => Rec.ALSetCurrentKey(fieldNos);
+public void ALSetAscending(int fieldNo, bool ascending) => Rec.ALSetAscending(fieldNo, ascending);
+public int ALCount => Rec.ALCount;
+public bool ALIsEmpty => Rec.ALIsEmpty;
+public bool ALIsTemporary => Rec.ALIsTemporary;
+public string ALTableCaption => Rec.ALTableCaption;
+public string ALTableName => Rec.ALTableName;
+public int ALFieldNo(string fieldName) => Rec.ALFieldNo(fieldName);
+public int ALFieldNo(int fieldNo) => Rec.ALFieldNo(fieldNo);
+public NavText ALFieldCaption(int fieldNo) => Rec.ALFieldCaption(fieldNo);
+public void ALSetRecFilter() => Rec.ALSetRecFilter();
+public void ALLockTable(DataError errorLevel = DataError.ThrowError) => Rec.ALLockTable(errorLevel);
+public bool ALRename(DataError errorLevel, params NavValue[] newKeyValues) => Rec.ALRename(errorLevel, newKeyValues);
+public void ALSetLoadFields(params int[] fieldNos) => Rec.ALSetLoadFields(fieldNos);
+public void ALSetAutoCalcFields(params object[] fields) => Rec.ALSetAutoCalcFields(fields);
+public string ALGetFilter() => Rec.ALGetFilter();
+public string ALGetFilter(int fieldNo) => Rec.ALGetFilter(fieldNo);
+public void ALAssign(MockRecordHandle other) => Rec.ALAssign(other);
+public int ALFilterGroup { get => Rec.ALFilterGroup; set => Rec.ALFilterGroup = value; }
+public object ALReadIsolation { get => Rec.ALReadIsolation; set => Rec.ALReadIsolation = value; }
+public void Clear() => Rec.Clear();
+public void ALTransferFields(MockRecordHandle source, bool initPrimaryKey = true) => Rec.ALTransferFields(source, initPrimaryKey);
+public void ALMark(bool mark = true) => Rec.ALMark(mark);
+public bool ALMarkedOnly { get => Rec.ALMarkedOnly; set => Rec.ALMarkedOnly = value; }
+public int CurrFieldNo { get; set; }
+public string ALGetFilters() => Rec.ALGetFilters();
+public NavValue ALGetRangeMinSafe(int fieldNo, NavType expectedType) => Rec.ALGetRangeMinSafe(fieldNo, expectedType);
+public NavValue ALGetRangeMaxSafe(int fieldNo, NavType expectedType) => Rec.ALGetRangeMaxSafe(fieldNo, expectedType);
+";
+            var delegatingMembers = CSharpSyntaxTree.ParseText(
+                $"class _Temp_ {{ {delegatingCode} }}").GetRoot()
+                .DescendantNodes().OfType<ClassDeclarationSyntax>().First().Members;
+
+            visited = visited.WithMembers(visited.Members.AddRange(delegatingMembers));
+        }
+
+        // For Page classes: add SaveRecord/Update/SetSelectionFilter/CheckType stubs
+        if (isPageClass)
+        {
+            var pageStubCode = @"
+public void SaveRecord() { }
+public void Update(bool saveRecord) { }
+public void SetSelectionFilter(MockRecordHandle record) { }
+public void CheckType(NavType actual, NavType expected) { }
+";
+            var pageMembers = CSharpSyntaxTree.ParseText(
+                $"class _Temp_ {{ {pageStubCode} }}").GetRoot()
+                .DescendantNodes().OfType<ClassDeclarationSyntax>().First().Members;
+
+            visited = visited.WithMembers(visited.Members.AddRange(pageMembers));
         }
 
         return visited;
@@ -364,9 +473,9 @@ public class RoslynRewriter : CSharpSyntaxRewriter
                 return true;
 
             // private new NavRecord ParentObject => ...;
-            // private new NavForm CurrPage => ...;
-            if (name == "ParentObject" || name == "CurrPage")
+            if (name == "ParentObject")
                 return true;
+            // CurrPage: Don't remove — rewrite to MockFormHandle in VisitPropertyDeclaration
 
             // protected override uint[] IndirectPermissionList => ...;
             if (name == "IndirectPermissionList")
@@ -462,6 +571,26 @@ public class RoslynRewriter : CSharpSyntaxRewriter
             return stubProp;
         }
 
+        // Rewrite CurrPage to return a MockFormHandle(0) stub.
+        // Original: private PageXXX CurrPage => (PageXXX)this;
+        // Rewritten: public MockFormHandle CurrPage { get; } = new MockFormHandle(0);
+        if (name == "CurrPage")
+        {
+            var stubProp = SyntaxFactory.PropertyDeclaration(
+                    SyntaxFactory.ParseTypeName("MockFormHandle"),
+                    SyntaxFactory.Identifier("CurrPage"))
+                .WithModifiers(SyntaxFactory.TokenList(
+                    SyntaxFactory.Token(SyntaxKind.PublicKeyword)))
+                .WithAccessorList(SyntaxFactory.AccessorList(
+                    SyntaxFactory.SingletonList(
+                        SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
+                            .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)))))
+                .WithInitializer(SyntaxFactory.EqualsValueClause(
+                    SyntaxFactory.ParseExpression("new MockFormHandle(0)")))
+                .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
+            return stubProp;
+        }
+
         return base.VisitPropertyDeclaration(node);
     }
 
@@ -499,7 +628,8 @@ public class RoslynRewriter : CSharpSyntaxRewriter
             if (paramName.Contains("parent") || firstParam.Identifier.Text.Contains("parent"))
             {
                 var typeText = firstParam.Type?.ToString() ?? "";
-                if (typeText.StartsWith("Codeunit"))
+                if (typeText.StartsWith("Codeunit") || typeText.StartsWith("Record") || typeText.StartsWith("Page")
+                    || typeText.StartsWith("Query") || typeText.StartsWith("Report") || typeText.StartsWith("XmlPort"))
                 {
                     // Keep the parameter, but add _parent assignment at the start of the body
                     var paramIdentifier = firstParam.Identifier.Text;
@@ -599,6 +729,10 @@ public class RoslynRewriter : CSharpSyntaxRewriter
         if (text == "NavTestActionHandle")
             return node.WithIdentifier(SyntaxFactory.Identifier("MockTestActionHandle"));
 
+        // NavFormHandle -> MockFormHandle (page handle requires ITreeObject -> NavSession)
+        if (text == "NavFormHandle")
+            return node.WithIdentifier(SyntaxFactory.Identifier("MockFormHandle"));
+
         return base.VisitIdentifierName(node);
     }
 
@@ -619,6 +753,13 @@ public class RoslynRewriter : CSharpSyntaxRewriter
             {
                 return SyntaxFactory.IdentifierName("MockRecordArray");
             }
+
+            // NavArray<T> -> MockArray<T> for ALL types
+            // NavArray requires ITreeObject (validates parent != null even in the simple ctor).
+            // Use our MockArray<T> which provides 0-based indexing without ITreeObject.
+            return SyntaxFactory.GenericName(
+                SyntaxFactory.Identifier("MockArray"),
+                visited.TypeArgumentList);
         }
 
         return visited;
@@ -695,6 +836,22 @@ public class RoslynRewriter : CSharpSyntaxRewriter
             if (firstArgText == "this")
             {
                 return visited.WithArgumentList(SyntaxFactory.ArgumentList());
+            }
+        }
+
+        // new MockFormHandle(this, pageId) -> new MockFormHandle(pageId)
+        // After identifier replacement, NavFormHandle is now MockFormHandle.
+        // Strip the ITreeObject 'this' argument.
+        if (typeText == "MockFormHandle" && visited.ArgumentList != null &&
+            visited.ArgumentList.Arguments.Count == 2)
+        {
+            var firstArgText = visited.ArgumentList.Arguments[0].Expression.ToString();
+            if (firstArgText == "this")
+            {
+                var pageId = visited.ArgumentList.Arguments[1].Expression;
+                return visited.WithArgumentList(SyntaxFactory.ArgumentList(
+                    SyntaxFactory.SingletonSeparatedList(
+                        SyntaxFactory.Argument(pageId))));
             }
         }
 
@@ -814,6 +971,62 @@ public class RoslynRewriter : CSharpSyntaxRewriter
             }
         }
 
+        // new MockArray<MockVariant>(new NavVariant.Factory(...), N) -> new MockArray<MockVariant>(N, () => new MockVariant())
+        // NavArray with Factory pattern: replace Factory-based construction with lambda-based MockArray
+        if (typeText.StartsWith("MockArray<MockVariant>") && visited.ArgumentList != null &&
+            visited.ArgumentList.Arguments.Count == 2)
+        {
+            var factoryArg = visited.ArgumentList.Arguments[0].Expression;
+            var sizeArg = visited.ArgumentList.Arguments[1].Expression;
+            if (factoryArg is ObjectCreationExpressionSyntax)
+            {
+                // new MockArray<MockVariant>(size, () => new MockVariant())
+                return SyntaxFactory.ObjectCreationExpression(
+                    SyntaxFactory.ParseTypeName("MockArray<MockVariant>"))
+                    .WithArgumentList(SyntaxFactory.ArgumentList(
+                        SyntaxFactory.SeparatedList(new[] {
+                            SyntaxFactory.Argument(sizeArg),
+                            SyntaxFactory.Argument(
+                                SyntaxFactory.ParenthesizedLambdaExpression(
+                                    SyntaxFactory.ObjectCreationExpression(
+                                        SyntaxFactory.ParseTypeName("MockVariant"))
+                                        .WithArgumentList(SyntaxFactory.ArgumentList())))
+                        })));
+            }
+        }
+
+        // Catch any remaining MockVariant.Factory or NavVariant.Factory construction
+        if (typeText.Contains("MockVariant") && typeText.Contains("Factory") && visited.ArgumentList != null)
+        {
+            // This shouldn't be reached anymore but kept as safety net
+            return SyntaxFactory.ObjectCreationExpression(
+                SyntaxFactory.ParseTypeName("NavVariant.Factory"))
+                .WithArgumentList(SyntaxFactory.ArgumentList(
+                    SyntaxFactory.SingletonSeparatedList(
+                        SyntaxFactory.Argument(
+                            SyntaxFactory.MemberAccessExpression(
+                                SyntaxKind.SimpleMemberAccessExpression,
+                                SyntaxFactory.IdentifierName("MockVariant"),
+                                SyntaxFactory.IdentifierName("StubTreeObject"))))));
+        }
+
+        // new NavArray<T>(this, defaultValue, size) -> new MockArray<T>(defaultValue, size)
+        // Drop the ITreeObject 'this' argument from NavArray/MockArray constructors.
+        // After generic name rewrite, NavArray<T> becomes MockArray<T>.
+        // MockArray<T>(T initValue, params int[] dimensions) matches the remaining args.
+        if ((typeText.StartsWith("MockArray") || typeText.StartsWith("NavArray")) &&
+            visited.ArgumentList != null && visited.ArgumentList.Arguments.Count >= 3)
+        {
+            var firstArgText = visited.ArgumentList.Arguments[0].Expression.ToString();
+            if (firstArgText == "this")
+            {
+                var newArgs = new SeparatedSyntaxList<ArgumentSyntax>();
+                for (int i = 1; i < visited.ArgumentList.Arguments.Count; i++)
+                    newArgs = newArgs.Add(visited.ArgumentList.Arguments[i]);
+                return visited.WithArgumentList(SyntaxFactory.ArgumentList(newArgs));
+            }
+        }
+
         // NOTE: We no longer strip 'this' from scope constructor calls.
         // Scope constructors now keep the βparent parameter and store it as _parent.
 
@@ -851,6 +1064,26 @@ public class RoslynRewriter : CSharpSyntaxRewriter
         {
             var exprText = memberAccess.Expression.ToString();
             var methodName = memberAccess.Name.Identifier.Text;
+
+            // NavDialog.ALConfirm(session, guid, question, [default]) -> MockDialog.ALConfirm(question, [default])
+            if ((exprText == "NavDialog" || exprText == "MockDialog") && methodName == "ALConfirm")
+            {
+                var args = visited.ArgumentList.Arguments;
+                // Skip first two args (Session and Guid)
+                if (args.Count >= 3)
+                {
+                    var keptArgs = new SeparatedSyntaxList<ArgumentSyntax>();
+                    for (int i = 2; i < args.Count; i++)
+                        keptArgs = keptArgs.Add(args[i]);
+
+                    return SyntaxFactory.InvocationExpression(
+                        SyntaxFactory.MemberAccessExpression(
+                            SyntaxKind.SimpleMemberAccessExpression,
+                            SyntaxFactory.IdentifierName("MockDialog"),
+                            SyntaxFactory.IdentifierName("ALConfirm")),
+                        SyntaxFactory.ArgumentList(keptArgs));
+                }
+            }
 
             // NavDialog.ALMessage / NavDialog.ALError
             if (exprText == "NavDialog" && (methodName == "ALMessage" || methodName == "ALError"))
@@ -902,6 +1135,23 @@ public class RoslynRewriter : CSharpSyntaxRewriter
                             SyntaxFactory.SingletonSeparatedList(
                                 SyntaxFactory.Argument(codeunitIdArg))));
                 }
+            }
+
+            // NavForm.Run(pageId, record) -> no-op (page navigation not supported standalone)
+            // NavForm.RunModal(bool, bool, pageId, record) -> FormResult.LookupOK
+            if (exprText == "NavForm" && (methodName == "Run" || methodName == "RunModal"))
+            {
+                // RunModal returns FormResult, but the enum is from Nav.Ncl. Return a constant.
+                // FormResult.LookupOK = used in transpiled code for dialog lookups
+                // For Run (void), we can't return anything - the statement-level handler will remove it
+                if (methodName == "RunModal")
+                {
+                    // Return 0 cast to the expected type (FormResult enum), or just return default
+                    return SyntaxFactory.DefaultExpression(
+                        SyntaxFactory.ParseTypeName("FormResult"));
+                }
+                // For Run: will be removed at statement level as a no-op
+                return visited;
             }
 
             // NCLEnumMetadata.Create(N) -> NCLOptionMetadata.Default
@@ -980,6 +1230,26 @@ public class RoslynRewriter : CSharpSyntaxRewriter
                         SyntaxKind.SimpleMemberAccessExpression,
                         SyntaxFactory.IdentifierName("AlCompat"),
                         SyntaxFactory.IdentifierName("ObjectToDecimal")));
+            }
+
+            // ALCompiler.NavIndirectValueToBoolean(x) -> AlCompat.NavIndirectValueToBoolean(x)
+            if (exprText == "ALCompiler" && methodName == "NavIndirectValueToBoolean")
+            {
+                return visited.WithExpression(
+                    SyntaxFactory.MemberAccessExpression(
+                        SyntaxKind.SimpleMemberAccessExpression,
+                        SyntaxFactory.IdentifierName("AlCompat"),
+                        SyntaxFactory.IdentifierName("NavIndirectValueToBoolean")));
+            }
+
+            // ALCompiler.NavIndirectValueToInt32(x) -> AlCompat.NavIndirectValueToInt32(x)
+            if (exprText == "ALCompiler" && methodName == "NavIndirectValueToInt32")
+            {
+                return visited.WithExpression(
+                    SyntaxFactory.MemberAccessExpression(
+                        SyntaxKind.SimpleMemberAccessExpression,
+                        SyntaxFactory.IdentifierName("AlCompat"),
+                        SyntaxFactory.IdentifierName("NavIndirectValueToInt32")));
             }
 
             // ALCompiler.NavIndirectValueToNavValue<T>(x) -> AlCompat.NavIndirectValueToNavValue<T>(x)
@@ -1099,6 +1369,18 @@ public class RoslynRewriter : CSharpSyntaxRewriter
                         SyntaxKind.SimpleMemberAccessExpression,
                         SyntaxFactory.IdentifierName("AlCompat"),
                         SyntaxFactory.IdentifierName("ObjectToBoolean")));
+            }
+
+            // ALSystemNumeric.ALRandomize(seed) -> AlCompat.ALRandomize(seed)
+            // ALSystemNumeric.ALRandom(max) -> AlCompat.ALRandom(max)
+            // ALRandomize/ALRandom require NavSession; our versions use System.Random.
+            if (exprText == "ALSystemNumeric" && (methodName == "ALRandomize" || methodName == "ALRandom"))
+            {
+                return visited.WithExpression(
+                    SyntaxFactory.MemberAccessExpression(
+                        SyntaxKind.SimpleMemberAccessExpression,
+                        SyntaxFactory.IdentifierName("AlCompat"),
+                        SyntaxFactory.IdentifierName(methodName)));
             }
 
             // value.ALByValue(this) -> value  (strip ITreeObject calls)
@@ -1323,6 +1605,14 @@ public class RoslynRewriter : CSharpSyntaxRewriter
                 StripEntireCallMethods.Contains(stripMa.Name.Identifier.Text))
             {
                 // Return empty statement instead of null to avoid crash inside using blocks
+                return SyntaxFactory.EmptyStatement();
+            }
+
+            // NavForm.Run(pageId, record) -> no-op (page navigation not supported standalone)
+            if (invocation.Expression is MemberAccessExpressionSyntax navFormMa &&
+                navFormMa.Expression.ToString() == "NavForm" &&
+                navFormMa.Name.Identifier.Text == "Run")
+            {
                 return SyntaxFactory.EmptyStatement();
             }
 

@@ -12,6 +12,16 @@ public class AlScope : IDisposable
 
     public void Run() => OnRun();
 
+    /// <summary>
+    /// BC's RunBehavior — wraps the OnRun call with commit behavior control.
+    /// In standalone mode, we just call OnRun and ignore the commit/error semantics.
+    /// Generated code calls: scope.RunBehavior(false, CommitBehavior.Ignore, null);
+    /// </summary>
+    public void RunBehavior(bool suppressErrors, object? commitBehavior, object? record)
+    {
+        OnRun();
+    }
+
     public void Dispose() { }
 
     // Debug coverage stubs - the AL compiler emits these for code coverage tracking
@@ -183,6 +193,30 @@ public static class AlCompat
     }
 
     /// <summary>
+    /// Replacement for ALCompiler.NavIndirectValueToBoolean.
+    /// Extracts a boolean from a variant/indirect value holder.
+    /// </summary>
+    public static bool NavIndirectValueToBoolean(object? value)
+    {
+        if (value is MockVariant mv) return NavIndirectValueToBoolean(mv.Value);
+        if (value is bool b) return b;
+        if (value is NavBoolean nb) return (bool)nb;
+        return Convert.ToBoolean(value);
+    }
+
+    /// <summary>
+    /// Replacement for ALCompiler.NavIndirectValueToInt32.
+    /// Extracts an int from a variant/indirect value holder.
+    /// </summary>
+    public static int NavIndirectValueToInt32(object? value)
+    {
+        if (value is MockVariant mv) return NavIndirectValueToInt32(mv.Value);
+        if (value is int i) return i;
+        if (value is NavInteger ni) return (int)ni;
+        return Convert.ToInt32(value);
+    }
+
+    /// <summary>
     /// Replacement for ALCompiler.NavIndirectValueToNavValue.
     /// Extracts the NavValue from a variant/indirect value holder.
     /// </summary>
@@ -307,5 +341,39 @@ public static class AlCompat
     public static NavCode CreateNavCode(int maxLength, string value)
     {
         return new NavCode(maxLength, value?.ToUpperInvariant() ?? "");
+    }
+
+    // -----------------------------------------------------------------------
+    // ALSystemNumeric replacements (ALRandomize/ALRandom require NavSession)
+    // -----------------------------------------------------------------------
+    [ThreadStatic] private static Random? _random;
+
+    /// <summary>
+    /// Replacement for ALSystemNumeric.ALRandomize(seed) which requires NavSession.
+    /// Seeds the thread-local random number generator.
+    /// </summary>
+    public static void ALRandomize(int seed)
+    {
+        _random = new Random(seed);
+    }
+
+    /// <summary>
+    /// Replacement for ALSystemNumeric.ALRandomize() (no-arg) which requires NavSession.
+    /// Seeds the thread-local random number generator with a time-based seed.
+    /// </summary>
+    public static void ALRandomize()
+    {
+        _random = new Random();
+    }
+
+    /// <summary>
+    /// Replacement for ALSystemNumeric.ALRandom(maxNumber) which requires NavSession.
+    /// Returns a random integer in [1, maxNumber].
+    /// </summary>
+    public static int ALRandom(int maxNumber)
+    {
+        _random ??= new Random();
+        if (maxNumber <= 0) return 0;
+        return _random.Next(1, maxNumber + 1);
     }
 }

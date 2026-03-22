@@ -82,6 +82,20 @@ public class MockVariant
     /// <summary>Get the underlying value.</summary>
     public object? Value => _value;
 
+    /// <summary>
+    /// Stub ITreeObject for NavVariant.Factory constructor.
+    /// NavVariant.Factory(ITreeObject) requires non-null parent.
+    /// We implement ITreeObject minimally to satisfy the null check.
+    /// </summary>
+    public static Microsoft.Dynamics.Nav.Runtime.ITreeObject StubTreeObject { get; } = new StubTree();
+
+    private class StubTree : Microsoft.Dynamics.Nav.Runtime.ITreeObject
+    {
+        public Microsoft.Dynamics.Nav.Runtime.TreeHandler Tree => null!;
+        public Microsoft.Dynamics.Nav.Runtime.TreeObjectType Type => default;
+        public bool SingleThreaded => false;
+    }
+
     public override string ToString()
     {
         return _value?.ToString() ?? "";
