@@ -164,6 +164,12 @@ public class MockRecordRef
     public object ALFieldIndex(int index) => index;
 
     /// <summary>
+    /// AL RecordRef.RecordId — returns a stub RecordId (NavRecordId needs NavSession).
+    /// Used as a string representation of the current record's identity.
+    /// </summary>
+    public object ALRecordId => $"Table{_tableId}:Record";
+
+    /// <summary>
     /// AL RecordRef.Field(fieldNo) — returns a NavFieldRef for the specified field.
     /// Creates a NavFieldRef with null ITreeObject; works for basic field access in standalone mode.
     /// </summary>
