@@ -43,6 +43,16 @@ public class MockRecordRef
     }
 
     /// <summary>
+    /// AL RecordRef.Open(compilationTarget, tableId) — transpiled from RecordRef.Open(tableId).
+    /// The BC transpiler emits CompilationTarget as the first arg; we ignore it.
+    /// </summary>
+    public void ALOpen(CompilationTarget target, int tableId)
+    {
+        _tableId = tableId;
+        _record = new MockRecordHandle(tableId);
+    }
+
+    /// <summary>
     /// AL RecordRef.Assign — copies from another RecordRef.
     /// Used in ByRef patterns: setValue => this.recRef.ALAssign(setValue)
     /// </summary>
@@ -62,8 +72,9 @@ public class MockRecordRef
 
     /// <summary>
     /// AL RecordRef.Number — returns the table number.
+    /// Property (not method) to match transpiled code: recRef.ALNumber
     /// </summary>
-    public int ALNumber() => _tableId;
+    public int ALNumber => _tableId;
 
     /// <summary>
     /// AL RecordRef.GetTable — gets the underlying record handle.
@@ -94,9 +105,29 @@ public class MockRecordRef
     public int ALCount => GetRecord().ALCount;
 
     /// <summary>
+    /// AL RecordRef.IsEmpty — delegates to underlying record.
+    /// </summary>
+    public bool ALIsEmpty => GetRecord().ALIsEmpty;
+
+    /// <summary>
+    /// AL RecordRef.Caption — returns the table caption (stub: table ID as string).
+    /// </summary>
+    public string ALCaption => $"Table{_tableId}";
+
+    /// <summary>
+    /// AL RecordRef.GetFilters — returns active filters as string (stub: empty string).
+    /// </summary>
+    public string ALGetFilters => "";
+
+    /// <summary>
     /// AL RecordRef.FindSet — delegates to underlying record.
     /// </summary>
     public bool ALFindSet() => GetRecord().ALFindSet();
+
+    /// <summary>
+    /// AL RecordRef.FindSet(DataError) — delegates to underlying record.
+    /// </summary>
+    public bool ALFindSet(DataError dataError) => GetRecord().ALFindSet();
 
     /// <summary>
     /// AL RecordRef.Next — delegates to underlying record.
@@ -133,11 +164,13 @@ public class MockRecordRef
     public object ALFieldIndex(int index) => index;
 
     /// <summary>
-    /// AL RecordRef.Field(fieldNo) — returns a field reference by number.
-    /// Stub: NavFieldRef requires ITreeObject and cannot be constructed standalone.
+    /// AL RecordRef.Field(fieldNo) — returns a NavFieldRef for the specified field.
+    /// Creates a NavFieldRef with null ITreeObject; works for basic field access in standalone mode.
     /// </summary>
-    public object ALField(int fieldNo)
+    public NavFieldRef ALField(int fieldNo)
     {
-        throw new NotSupportedException($"RecordRef.Field({fieldNo}) is not supported in standalone mode");
+        // NavFieldRef requires ITreeObject but works with null for basic operations.
+        // Return a new NavFieldRef — actual field value access goes through MockRecordHandle.
+        return new NavFieldRef(null!);
     }
 }

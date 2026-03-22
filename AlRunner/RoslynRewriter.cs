@@ -50,6 +50,28 @@ public class RoslynRewriter : CSharpSyntaxRewriter
     };
 
     /// <summary>
+    /// Methods where the first 'this' argument (ITreeObject) should be replaced with null!,
+    /// keeping the rest of the call intact. These are BC runtime methods on real BC types
+    /// that require ITreeObject but work with null in standalone mode.
+    /// e.g. blob.ALCreateInStream(this, inStr) -> blob.ALCreateInStream(null!, inStr)
+    /// </summary>
+    private static readonly HashSet<string> NullifyFirstThisArgMethods = new(StringComparer.Ordinal)
+    {
+        "ALCreateInStream", "ALCreateOutStream",
+    };
+
+    /// <summary>
+    /// Methods where the first 'this' argument (ITreeObject) should be removed entirely,
+    /// keeping the rest of the call intact. These are methods on mock types (MockRecordRef)
+    /// where the mock doesn't need the ITreeObject parameter.
+    /// e.g. recRef.ALField(this, fieldNo) -> recRef.ALField(fieldNo)
+    /// </summary>
+    private static readonly HashSet<string> StripFirstThisArgMethods = new(StringComparer.Ordinal)
+    {
+        "ALField",
+    };
+
+    /// <summary>
     /// Names of .Target methods on record handles that should have .Target stripped.
     /// </summary>
     private static readonly HashSet<string> RecordTargetMethods = new(StringComparer.Ordinal)
@@ -172,7 +194,8 @@ public class RoslynRewriter : CSharpSyntaxRewriter
             foreach (var baseType in node.BaseList.Types)
             {
                 var typeText = baseType.Type.ToString();
-                if (typeText.StartsWith("NavMethodScope<") || typeText.StartsWith("NavTriggerMethodScope<"))
+                if (typeText.StartsWith("NavMethodScope<") || typeText.StartsWith("NavTriggerMethodScope<")
+                    || typeText.StartsWith("NavEventMethodScope<"))
                 {
                     isScopeClass = true;
                     // Extract the generic type parameter as the enclosing class name
@@ -737,6 +760,23 @@ public class RoslynRewriter : CSharpSyntaxRewriter
             }
         }
 
+        // new NavFieldRef(this) -> new NavFieldRef(null!)
+        // NavFieldRef constructor takes ITreeObject; replace 'this' with null! for standalone mode.
+        if (typeText == "NavFieldRef" && visited.ArgumentList != null &&
+            visited.ArgumentList.Arguments.Count == 1)
+        {
+            var firstArgText = visited.ArgumentList.Arguments[0].Expression.ToString();
+            if (firstArgText == "this")
+            {
+                var nullBang = SyntaxFactory.PostfixUnaryExpression(
+                    SyntaxKind.SuppressNullableWarningExpression,
+                    SyntaxFactory.LiteralExpression(SyntaxKind.NullLiteralExpression));
+                return visited.WithArgumentList(SyntaxFactory.ArgumentList(
+                    SyntaxFactory.SingletonSeparatedList(
+                        SyntaxFactory.Argument(nullBang))));
+            }
+        }
+
         // new NavArray<MockRecordHandle>(new MockRecordHandle.Factory2(this, tableId, false, SecurityFiltering.X), N)
         // -> new MockRecordArray(tableId, N)
         // Also matches after GenericName rewrite: new MockRecordArray(new MockRecordHandle.Factory2(...), N)
@@ -1067,6 +1107,40 @@ public class RoslynRewriter : CSharpSyntaxRewriter
             {
                 // Return just the expression the method is called on
                 return memberAccess.Expression;
+            }
+
+            // blob.ALCreateInStream(this, inStr) -> blob.ALCreateInStream(null!, inStr)
+            // Replace the first 'this' (ITreeObject) argument with null! but keep the rest.
+            // These are real BC runtime methods that require ITreeObject; they work with null
+            // in standalone mode for the operations we support.
+            if (NullifyFirstThisArgMethods.Contains(methodName))
+            {
+                var args = visited.ArgumentList.Arguments;
+                if (args.Count >= 1 && args[0].Expression.ToString() == "this")
+                {
+                    var nullBang = SyntaxFactory.PostfixUnaryExpression(
+                        SyntaxKind.SuppressNullableWarningExpression,
+                        SyntaxFactory.LiteralExpression(SyntaxKind.NullLiteralExpression));
+                    var newArgs = new SeparatedSyntaxList<ArgumentSyntax>();
+                    newArgs = newArgs.Add(SyntaxFactory.Argument(nullBang));
+                    for (int i = 1; i < args.Count; i++)
+                        newArgs = newArgs.Add(args[i]);
+                    return visited.WithArgumentList(SyntaxFactory.ArgumentList(newArgs));
+                }
+            }
+
+            // recRef.ALField(this, fieldNo) -> recRef.ALField(fieldNo)
+            // Strip the first 'this' (ITreeObject) argument from mock type methods.
+            if (StripFirstThisArgMethods.Contains(methodName))
+            {
+                var args = visited.ArgumentList.Arguments;
+                if (args.Count >= 2 && args[0].Expression.ToString() == "this")
+                {
+                    var keptArgs = new SeparatedSyntaxList<ArgumentSyntax>();
+                    for (int i = 1; i < args.Count; i++)
+                        keptArgs = keptArgs.Add(args[i]);
+                    return visited.WithArgumentList(SyntaxFactory.ArgumentList(keptArgs));
+                }
             }
 
             // NavFormatEvaluateHelper.Format(this.Session, value) -> AlCompat.Format(value)

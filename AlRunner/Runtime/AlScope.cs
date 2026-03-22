@@ -173,12 +173,13 @@ public static class AlCompat
 
     /// <summary>
     /// Replacement for ALCompiler.ToVariant / NavValueToVariant.
-    /// Wraps a value as an object (Variant in AL is just object in C#).
+    /// Wraps a value as a MockVariant (Variant in AL is NavVariant → MockVariant in rewritten code).
+    /// Returns MockVariant so it can be passed to methods expecting MockVariant parameters.
     /// </summary>
-    public static object ToVariant(object? value)
+    public static MockVariant ToVariant(object? value)
     {
-        if (value is MockVariant mv) return mv.Value ?? "";
-        return value ?? "";
+        if (value is MockVariant mv) return mv;
+        return new MockVariant(value ?? "");
     }
 
     /// <summary>
