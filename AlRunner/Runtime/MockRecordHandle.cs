@@ -63,6 +63,21 @@ public class MockRecordHandle
     {
         if (_fields.TryGetValue(fieldNo, out var val))
             return val;
+        // For Media/MediaSet types, auto-generate and persist a unique value
+        // so that repeated reads return the same value, and different records
+        // (or re-inserted records) get different MediaIds.
+        if (expectedType == NavType.Media)
+        {
+            var media = new NavMedia(Guid.NewGuid());
+            _fields[fieldNo] = media;
+            return media;
+        }
+        if (expectedType == NavType.MediaSet)
+        {
+            var mediaSet = new NavMediaSet(Guid.NewGuid());
+            _fields[fieldNo] = mediaSet;
+            return mediaSet;
+        }
         return DefaultForType(expectedType);
     }
 
@@ -95,16 +110,7 @@ public class MockRecordHandle
     {
         var table = _tables[_tableId];
         var row = new Dictionary<int, NavValue>(_fields);
-        // Auto-assign unique MediaIds for any NavMedia fields that are still at default
-        foreach (var key in row.Keys.ToList())
-        {
-            if (row[key] is NavMedia media && !media.ALHasValue)
-                row[key] = new NavMedia(Guid.NewGuid());
-        }
         table.Add(row);
-        // Sync cursor fields with what was stored (so MediaId reads work)
-        foreach (var kv in row)
-            _fields[kv.Key] = kv.Value;
         return true;
     }
 
