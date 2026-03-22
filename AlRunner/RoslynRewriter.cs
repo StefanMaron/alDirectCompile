@@ -17,7 +17,7 @@ public class RoslynRewriter : CSharpSyntaxRewriter
         "NavFunctionVisibility",
         "NavCaption",
         "NavName",
-        "NavTest",
+        // "NavTest" — kept for test method discovery by the executor
         "SignatureSpan",
         "SourceSpans",
         "ReturnValue",
@@ -45,6 +45,8 @@ public class RoslynRewriter : CSharpSyntaxRewriter
         "ALCommit",   // ALDatabase.ALCommit() — SQL transaction commit, no-op standalone
         "ALCommit",   // ALDatabase.ALCommit() — transaction commit, no-op standalone
         "ALSelectLatestVersion", // ALDatabase.ALSelectLatestVersion() — no-op standalone
+        "ALBindSubscription",   // ALSession.ALBindSubscription() — event binding, no-op standalone
+        "ALUnbindSubscription", // ALSession.ALUnbindSubscription() — event unbinding, no-op standalone
     };
 
     private static readonly HashSet<string> StripITreeObjectArgMethods = new(StringComparer.Ordinal)

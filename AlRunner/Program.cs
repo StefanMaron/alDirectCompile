@@ -991,21 +991,33 @@ public static class Executor
 {
     public static int RunTests(Assembly assembly)
     {
-        // Find all test scope classes: names like TestXxx_Scope_NNN
+        // Find test methods using [NavTest] attribute on the parent method,
+        // then find the corresponding _Scope_ nested class.
         var testScopes = new List<(string TestName, Type ScopeType, Type ParentType)>();
 
         foreach (var type in assembly.GetTypes())
         {
+            // Find methods with [NavTest] attribute
+            var testMethodNames = new HashSet<string>();
+            foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+            {
+                if (method.GetCustomAttributes().Any(a => a.GetType().Name == "NavTestAttribute"))
+                {
+                    testMethodNames.Add(method.Name);
+                }
+            }
+
+            // Find corresponding scope classes for test methods
             foreach (var nested in type.GetNestedTypes(BindingFlags.NonPublic | BindingFlags.Public))
             {
-                // Match pattern: Test*_Scope_* but not OnRun_Scope
                 var name = nested.Name;
                 if (name.Contains("_Scope_") && !name.Contains("OnRun_Scope"))
                 {
                     var scopeIdx = name.IndexOf("_Scope_");
                     var testName = name.Substring(0, scopeIdx);
-                    // Only include if it looks like a test method (starts with Test)
-                    if (testName.StartsWith("Test", StringComparison.OrdinalIgnoreCase))
+                    // Include if method has [NavTest] attribute OR starts with "Test" (fallback)
+                    if (testMethodNames.Contains(testName) ||
+                        testName.StartsWith("Test", StringComparison.OrdinalIgnoreCase))
                     {
                         testScopes.Add((testName, nested, type));
                     }
