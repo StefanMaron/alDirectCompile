@@ -111,6 +111,14 @@ public class MockTestPageHandle
         return new MockTestActionHandle(_pageId, actionId);
     }
 
+    /// <summary>
+    /// GetBuiltInAction(FormResult) — overload for when the transpiler emits FormResult enum values.
+    /// </summary>
+    public MockTestActionHandle GetBuiltInAction(FormResult result)
+    {
+        return new MockTestActionHandle(_pageId, (int)result);
+    }
+
     // -----------------------------------------------------------------------
     // Parts (subpages)
     // -----------------------------------------------------------------------

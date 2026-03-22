@@ -1,0 +1,143 @@
+namespace AlRunner.Runtime;
+
+using Microsoft.Dynamics.Nav.Runtime;
+using Microsoft.Dynamics.Nav.Types;
+
+/// <summary>
+/// In-memory replacement for NavRecordRef which requires ITreeObject (NavSession chain).
+/// NavRecordRef is the AL RecordRef type — a dynamic reference to a record.
+/// In standalone mode, we provide a minimal stub that supports the operations
+/// used in test code (Open, ALAssign, field access, etc.).
+/// </summary>
+public class MockRecordRef
+{
+    private int _tableId;
+    private MockRecordHandle? _record;
+
+    public MockRecordRef()
+    {
+    }
+
+    public MockRecordRef(int tableId)
+    {
+        _tableId = tableId;
+        _record = new MockRecordHandle(tableId);
+    }
+
+    /// <summary>
+    /// AL RecordRef.Open(tableId) — opens a reference to the specified table.
+    /// </summary>
+    public void ALOpen(int tableId)
+    {
+        _tableId = tableId;
+        _record = new MockRecordHandle(tableId);
+    }
+
+    /// <summary>
+    /// AL RecordRef.Open(tableId, temporary) — opens a reference with temporary flag.
+    /// </summary>
+    public void ALOpen(int tableId, bool temporary)
+    {
+        _tableId = tableId;
+        _record = new MockRecordHandle(tableId);
+    }
+
+    /// <summary>
+    /// AL RecordRef.Assign — copies from another RecordRef.
+    /// Used in ByRef patterns: setValue => this.recRef.ALAssign(setValue)
+    /// </summary>
+    public void ALAssign(MockRecordRef other)
+    {
+        _tableId = other._tableId;
+        _record = other._record;
+    }
+
+    /// <summary>
+    /// AL RecordRef.Close — releases the reference.
+    /// </summary>
+    public void ALClose()
+    {
+        // No-op in standalone mode
+    }
+
+    /// <summary>
+    /// AL RecordRef.Number — returns the table number.
+    /// </summary>
+    public int ALNumber() => _tableId;
+
+    /// <summary>
+    /// AL RecordRef.GetTable — gets the underlying record handle.
+    /// </summary>
+    public MockRecordHandle GetRecord()
+    {
+        return _record ?? new MockRecordHandle(_tableId);
+    }
+
+    /// <summary>
+    /// AL RecordRef.ReadPermission — stub, always returns true in standalone mode.
+    /// </summary>
+    public bool ALReadPermission => true;
+
+    /// <summary>
+    /// AL RecordRef.WritePermission — stub, always returns true in standalone mode.
+    /// </summary>
+    public bool ALWritePermission => true;
+
+    /// <summary>
+    /// AL RecordRef.Name — returns the table name (stub: returns table ID as string).
+    /// </summary>
+    public string ALName() => $"Table{_tableId}";
+
+    /// <summary>
+    /// AL RecordRef.Count — delegates to underlying record.
+    /// </summary>
+    public int ALCount => GetRecord().ALCount;
+
+    /// <summary>
+    /// AL RecordRef.FindSet — delegates to underlying record.
+    /// </summary>
+    public bool ALFindSet() => GetRecord().ALFindSet();
+
+    /// <summary>
+    /// AL RecordRef.Next — delegates to underlying record.
+    /// </summary>
+    public int ALNext() => GetRecord().ALNext();
+
+    /// <summary>
+    /// AL RecordRef.FieldCount — stub, returns 0.
+    /// </summary>
+    public int ALFieldCount() => 0;
+
+    /// <summary>
+    /// AL RecordRef.IsTemporary — stub, returns false.
+    /// </summary>
+    public bool ALIsTemporary => false;
+
+    /// <summary>
+    /// AL RecordRef.Copy — copies the record ref.
+    /// </summary>
+    public void ALCopy(MockRecordRef source)
+    {
+        _tableId = source._tableId;
+        _record = source._record;
+    }
+
+    /// <summary>
+    /// AL RecordRef.FindSet — delegates to underlying record.
+    /// </summary>
+    public bool ALFindSet(int mode) => GetRecord().ALFindSet();
+
+    /// <summary>
+    /// AL RecordRef.FieldIndex — stub returning a field ref-like value.
+    /// </summary>
+    public object ALFieldIndex(int index) => index;
+
+    /// <summary>
+    /// AL RecordRef.Field(fieldNo) — returns a field reference by number.
+    /// Stub: NavFieldRef requires ITreeObject and cannot be constructed standalone.
+    /// </summary>
+    public object ALField(int fieldNo)
+    {
+        throw new NotSupportedException($"RecordRef.Field({fieldNo}) is not supported in standalone mode");
+    }
+}

@@ -46,6 +46,49 @@ public class AlScope : IDisposable
 }
 
 /// <summary>
+/// Instance replacement for NavDialog (the BC dialog/progress window object).
+/// The transpiled code creates NavDialog instances for progress bars (ALOpen, ALUpdate, ALClose).
+/// In standalone mode, we no-op these operations.
+/// </summary>
+public class MockDialog
+{
+    public MockDialog() { }
+
+    public void ALOpen(Guid id, NavText text) { }
+    public void ALOpen(Guid id, NavText text, NavText text2) { }
+    public void ALUpdate(int fieldNo, NavValue value) { }
+    public void ALClose() { }
+    public void ALAssign(MockDialog other) { }
+
+    // For ByRef<NavDialog> patterns that access .Value
+    public MockDialog Value => this;
+
+    /// <summary>
+    /// AL's CONFIRM dialog — returns true (user confirmed) in standalone mode.
+    /// </summary>
+    public static bool ALConfirm(string question, bool defaultButton = false, params object?[] args)
+    {
+        return true; // Always confirm in standalone mode
+    }
+
+    /// <summary>
+    /// AL's CONFIRM dialog with NavText parameters.
+    /// </summary>
+    public static bool ALConfirm(NavText question, bool defaultButton = false)
+    {
+        return true;
+    }
+
+    /// <summary>
+    /// AL's CONFIRM dialog with Guid (for dialog ID) and NavText.
+    /// </summary>
+    public static bool ALConfirm(Guid dialogId, NavText question, bool defaultButton)
+    {
+        return true;
+    }
+}
+
+/// <summary>
 /// Replacement for NavDialog static methods.
 /// Translates AL Message/Error calls to console output / exceptions.
 /// </summary>
@@ -97,6 +140,7 @@ public static class AlCompat
     public static NavValue ToNavValue(object? value)
     {
         if (value == null) return new NavText("");
+        if (value is MockVariant mv) return ToNavValue(mv.Value);
         if (value is NavValue nv) return nv;
         if (value is string s) return new NavText(s);
         if (value is int i) return NavInteger.Create(i);
@@ -131,7 +175,26 @@ public static class AlCompat
     /// Replacement for ALCompiler.ToVariant / NavValueToVariant.
     /// Wraps a value as an object (Variant in AL is just object in C#).
     /// </summary>
-    public static object ToVariant(object? value) => value ?? "";
+    public static object ToVariant(object? value)
+    {
+        if (value is MockVariant mv) return mv.Value ?? "";
+        return value ?? "";
+    }
+
+    /// <summary>
+    /// Replacement for ALCompiler.NavIndirectValueToNavValue.
+    /// Extracts the NavValue from a variant/indirect value holder.
+    /// </summary>
+    public static T NavIndirectValueToNavValue<T>(object? value) where T : NavValue
+    {
+        if (value is T directValue) return directValue;
+        if (value is MockVariant mv && mv.Value is T mvValue) return mvValue;
+        if (value is NavValue nv && nv is T typedValue) return typedValue;
+        // Try conversion from string
+        if (typeof(T) == typeof(NavText))
+            return (T)(NavValue)new NavText(value?.ToString() ?? "");
+        throw new InvalidCastException($"Cannot convert {value?.GetType().Name ?? "null"} to {typeof(T).Name}");
+    }
 
     /// <summary>
     /// Replacement for NavFormatEvaluateHelper.Format.
@@ -140,6 +203,8 @@ public static class AlCompat
     public static string Format(object? value)
     {
         if (value == null) return "";
+        // Unwrap MockVariant to get the underlying value
+        if (value is MockVariant mv) return Format(mv.Value);
         // Handle native .NET numeric types
         if (value is decimal d) return FormatDecimal(d);
         if (value is double dbl) return FormatDecimal((decimal)dbl);
@@ -232,7 +297,14 @@ public static class AlCompat
     public static bool ALIsFile(object? v) => v?.GetType().Name == "NavFile";
     public static bool ALIsDotNet(object? v) => false; // DotNet types not supported in standalone
     public static bool ALIsAutomation(object? v) => false; // Automation types not supported in standalone
-}
 
-// NavVariant type-check properties are rewritten from value.ALIsXxx to AlCompat.ALIsXxx(value)
-// These are added as static methods on AlCompat above.
+    /// <summary>
+    /// Safe NavCode constructor that pre-uppercases the string value.
+    /// NavCode.EnsureValueIsUppercasedIfNeeded() calls NavEnvironment which crashes on Linux.
+    /// By passing an already-uppercased string, the check is skipped.
+    /// </summary>
+    public static NavCode CreateNavCode(int maxLength, string value)
+    {
+        return new NavCode(maxLength, value?.ToUpperInvariant() ?? "");
+    }
+}

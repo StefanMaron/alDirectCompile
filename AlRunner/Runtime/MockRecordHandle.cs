@@ -49,11 +49,31 @@ public class MockRecordHandle
         _fields[fieldNo] = value;
     }
 
+    /// <summary>
+    /// SetFieldValueSafe with validate flag — 4-arg overload.
+    /// The 4th parameter indicates whether to fire OnValidate triggers.
+    /// In standalone mode, we just set the value.
+    /// </summary>
+    public void SetFieldValueSafe(int fieldNo, NavType expectedType, NavValue value, bool validate)
+    {
+        _fields[fieldNo] = value;
+    }
+
     public NavValue GetFieldValueSafe(int fieldNo, NavType expectedType)
     {
         if (_fields.TryGetValue(fieldNo, out var val))
             return val;
         return DefaultForType(expectedType);
+    }
+
+    /// <summary>
+    /// GetFieldValueSafe with extra bool parameter — 3-arg overload.
+    /// The third parameter typically indicates whether to use locale formatting.
+    /// In standalone mode, we ignore it and return the field value.
+    /// </summary>
+    public NavValue GetFieldValueSafe(int fieldNo, NavType expectedType, bool useLocale)
+    {
+        return GetFieldValueSafe(fieldNo, expectedType);
     }
 
     /// <summary>For Error() formatting - returns the field value as NavValue.</summary>
@@ -198,6 +218,15 @@ public class MockRecordHandle
         return false;
     }
 
+    /// <summary>
+    /// ALDeleteAll(bool runTrigger) — overload for when the transpiler emits a bool directly.
+    /// In BC, ALDeleteAll(bool) is valid: it means "delete all, with/without triggers".
+    /// </summary>
+    public void ALDeleteAll(bool runTrigger)
+    {
+        ALDeleteAll(DataError.ThrowError, runTrigger);
+    }
+
     public void ALDeleteAll(DataError errorLevel = DataError.ThrowError, bool runTrigger = false)
     {
         if (_filters.Count == 0)
@@ -323,6 +352,16 @@ public class MockRecordHandle
         _ascending[fieldNo] = ascending;
     }
 
+    /// <summary>
+    /// AL's FILTERGROUP — sets the filter group for subsequent filter operations.
+    /// In BC, filter groups isolate filters. In standalone mode, this is a no-op
+    /// since we don't track filter groups.
+    /// </summary>
+    public void ALFilterGroup(int groupId)
+    {
+        // No-op: filter groups not implemented in standalone mode
+    }
+
     // -----------------------------------------------------------------------
     // Reset — clears filters, fields, and cursor
     // -----------------------------------------------------------------------
@@ -349,6 +388,15 @@ public class MockRecordHandle
     {
         // Simplified: return 0 (unknown) -- real impl would look up field metadata
         return 0;
+    }
+
+    /// <summary>
+    /// AL's FIELDNO(fieldNo) — returns the field number for a given field number.
+    /// In BC, this overload accepts a field enum value (int). Returns it directly.
+    /// </summary>
+    public int ALFieldNo(int fieldNo)
+    {
+        return fieldNo;
     }
 
     // -----------------------------------------------------------------------
@@ -474,6 +522,14 @@ public class MockRecordHandle
     // Copy — copies field values and filters from another record handle
     // -----------------------------------------------------------------------
 
+    /// <summary>
+    /// ALAssign — assigns the record from another handle (used in ByRef patterns).
+    /// </summary>
+    public void ALAssign(MockRecordHandle other)
+    {
+        _fields = new Dictionary<int, NavValue>(other._fields);
+    }
+
     public void ALCopy(MockRecordHandle source, bool shareFilters = false)
     {
         _fields = new Dictionary<int, NavValue>(source._fields);
@@ -513,6 +569,12 @@ public class MockRecordHandle
     /// Returns a placeholder since we don't have metadata.
     /// </summary>
     public string ALTableCaption => $"Table{_tableId}";
+
+    /// <summary>
+    /// AL's ISTEMPORARY — returns whether this is a temporary record.
+    /// In standalone mode, all records are effectively in-memory, returns false.
+    /// </summary>
+    public bool ALIsTemporary => false;
 
     /// <summary>
     /// AL's TABLENAME — returns the name of the table.
@@ -858,4 +920,80 @@ public class MockRecordHandle
         };
     }
 
+    /// <summary>
+    /// AL SetAutoCalcFields — stub, no-op in standalone mode.
+    /// In BC, this configures automatic calculation of FlowFields.
+    /// </summary>
+    public void ALSetAutoCalcFields(params object[] fields)
+    {
+        // No-op: FlowFields not supported in standalone mode
+    }
+
+    /// <summary>
+    /// AL GetFilter — stub returning empty string.
+    /// In BC, this returns the current filter expression as a string.
+    /// </summary>
+    public string ALGetFilter()
+    {
+        return "";
+    }
+
+    /// <summary>
+    /// AL GetFilter(fieldNo) — stub returning empty string for specific field.
+    /// </summary>
+    public string ALGetFilter(int fieldNo)
+    {
+        return "";
+    }
+
+    /// <summary>
+    /// Invoke method (for cross-object method calls on records used as codeunit-like objects).
+    /// Records in BC can have methods that are called via member IDs, similar to codeunits.
+    /// In standalone mode, we use reflection to find and call the method.
+    /// </summary>
+    /// <summary>
+    /// Invoke overload with DataError parameter — matches transpiler pattern
+    /// for record method dispatch with error handling level.
+    /// </summary>
+    public object? Invoke(DataError errorLevel, int memberId, object[] args)
+    {
+        return Invoke(memberId, args);
+    }
+
+    public object? Invoke(int memberId, object[] args)
+    {
+        // Delegate to MockCodeunitHandle-style dispatch on the record type
+        var assembly = MockCodeunitHandle.CurrentAssembly ?? System.Reflection.Assembly.GetExecutingAssembly();
+        var recordTypeName = $"Record{_tableId}";
+        var recordType = assembly.GetTypes().FirstOrDefault(t => t.Name == recordTypeName);
+        if (recordType == null)
+            throw new InvalidOperationException($"Record type {recordTypeName} not found in assembly for Invoke");
+
+        // Find scope class matching the member ID
+        var absMemberId = Math.Abs(memberId).ToString();
+        var memberIdStr = memberId.ToString();
+        foreach (var nested in recordType.GetNestedTypes(System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public))
+        {
+            if (nested.Name.Contains($"_Scope_{memberIdStr}") ||
+                nested.Name.Contains($"_Scope__{absMemberId}"))
+            {
+                var scopeIdx = nested.Name.IndexOf("_Scope_");
+                if (scopeIdx < 0) continue;
+                var methodName = nested.Name.Substring(0, scopeIdx);
+                var method = recordType.GetMethod(methodName,
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (method == null) continue;
+
+                var instance = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(recordType);
+                var parameters = method.GetParameters();
+                var convertedArgs = new object?[parameters.Length];
+                for (int i = 0; i < parameters.Length && i < args.Length; i++)
+                    convertedArgs[i] = args[i];
+                return method.Invoke(instance, convertedArgs);
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"Method with member ID {memberId} not found in record type {recordTypeName}");
+    }
 }

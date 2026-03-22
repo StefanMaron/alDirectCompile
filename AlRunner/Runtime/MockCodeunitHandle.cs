@@ -31,6 +31,15 @@ public class MockCodeunitHandle
     }
 
     /// <summary>
+    /// Clears the reference (no-op for standalone execution).
+    /// Called from generated codeunit code when resetting handles.
+    /// </summary>
+    public void ClearReference()
+    {
+        _codeunitInstance = null;
+    }
+
+    /// <summary>
     /// Static factory matching the rewritten constructor pattern.
     /// </summary>
     public static MockCodeunitHandle Create(int codeunitId)
@@ -107,6 +116,43 @@ public class MockCodeunitHandle
             $"Method with member ID {memberId} not found in codeunit {_codeunitId}");
     }
 
+    /// <summary>
+    /// Static dispatch: run a codeunit's OnRun trigger by ID.
+    /// Replacement for NavCodeunit.RunCodeunit(DataError, codeunitId, record).
+    /// </summary>
+    public static void RunCodeunit(int codeunitId)
+    {
+        var handle = new MockCodeunitHandle(codeunitId);
+        // Invoke the OnRun scope (member ID 0 or find OnRun explicitly)
+        var assembly = CurrentAssembly ?? Assembly.GetExecutingAssembly();
+        var codeunitType = handle.FindCodeunitType(assembly);
+        if (codeunitType == null)
+            throw new InvalidOperationException($"Codeunit {codeunitId} not found in assembly");
+
+        var instance = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(codeunitType);
+        var initMethod = codeunitType.GetMethod("InitializeComponent",
+            BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+        initMethod?.Invoke(instance, null);
+
+        // Find and invoke the OnRun method (parameterless or with record parameter)
+        var onRunMethod = codeunitType.GetMethod("OnRun",
+            BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
+        if (onRunMethod != null)
+        {
+            onRunMethod.Invoke(instance, null);
+            return;
+        }
+
+        // Try finding OnRun with parameters
+        var onRunMethods = codeunitType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Where(m => m.Name == "OnRun").ToArray();
+        if (onRunMethods.Length > 0)
+        {
+            onRunMethods[0].Invoke(instance, new object?[onRunMethods[0].GetParameters().Length]);
+            return;
+        }
+    }
+
     private Type? FindCodeunitType(Assembly assembly)
     {
         var expectedName = $"Codeunit{_codeunitId}";
@@ -117,6 +163,12 @@ public class MockCodeunitHandle
     {
         if (arg == null) return null;
         if (targetType.IsAssignableFrom(arg.GetType())) return arg;
+
+        // MockVariant -> unwrap to underlying value and retry
+        if (arg is MockVariant mv)
+        {
+            return ConvertArg(mv.Value, targetType);
+        }
 
         // int/decimal -> Decimal18 conversion
         if (targetType.Name == "Decimal18")
@@ -130,6 +182,12 @@ public class MockCodeunitHandle
                 decimal decVal = Convert.ToDecimal(arg);
                 return decCtor.Invoke(new object[] { decVal });
             }
+        }
+
+        // object -> MockVariant conversion (Variant parameters in AL)
+        if (targetType == typeof(MockVariant))
+        {
+            return new MockVariant(arg);
         }
 
         // object -> NavVariant conversion (Variant parameters in AL)

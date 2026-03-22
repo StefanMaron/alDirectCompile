@@ -46,7 +46,7 @@ public class RoslynRewriter : CSharpSyntaxRewriter
 
     private static readonly HashSet<string> StripITreeObjectArgMethods = new(StringComparer.Ordinal)
     {
-        "ALByValue", "ModifyLength",
+        "ALByValue", "ModifyLength", "ALRecord",
     };
 
     /// <summary>
@@ -199,7 +199,8 @@ public class RoslynRewriter : CSharpSyntaxRewriter
 
                 if (typeText == "NavCodeunit" || typeText == "NavTestCodeunit" || typeText == "NavRecord"
                     || typeText == "NavFormExtension" || typeText == "NavRecordExtension"
-                    || typeText == "NavEventScope" || typeText == "NavUpgradeCodeunit")
+                    || typeText == "NavEventScope" || typeText == "NavUpgradeCodeunit"
+                    || typeText == "NavForm")
                 {
                     // Remove these base classes entirely
                     continue;
@@ -299,8 +300,20 @@ public class RoslynRewriter : CSharpSyntaxRewriter
             if (name == "OnMetadataLoaded" || name == "EvaluateCaptionClass"
                 || name == "OnEvaluateCaptionClass" || name == "RegisterDynamicCaptionExpression"
                 || name == "EnsureGlobalVariablesInitialized" || name == "CallEvaluateCaptionClassExtensionMethod"
-                || name == "CallOnMetadataLoadedExtensionMethod")
+                || name == "CallOnMetadataLoadedExtensionMethod"
+                || name == "RegisterUIPart")
                 return true;
+
+            // Remove Page InitializeComponent that contains NavForm-specific calls.
+            // Codeunit InitializeComponent doesn't call these, so this is safe.
+            if (name == "InitializeComponent" || name == "InitializeForm")
+            {
+                var bodyText = method.Body?.ToString() ?? "";
+                if (bodyText.Contains("CallInitializeComponentExtensionMethod") ||
+                    bodyText.Contains("InitializeForm") ||
+                    bodyText.Contains("RegisterUIPart"))
+                    return true;
+            }
         }
 
         // Remove specific properties
@@ -320,9 +333,8 @@ public class RoslynRewriter : CSharpSyntaxRewriter
             if (name == "IsSingleInstance")
                 return true;
 
-            // private RecordXXX Rec => ...; or private NavRecord Rec => (NavRecord)base.ParentObject;
-            if (name == "Rec" || name == "xRec")
-                return true;
+            // Rec/xRec: Don't remove — rewrite to MockRecordHandle stub in VisitPropertyDeclaration
+            // (removed the deletion that was here)
 
             // protected override uint RawScopeId { get => ...; set => ...; }
             if (name == "RawScopeId")
@@ -383,7 +395,8 @@ public class RoslynRewriter : CSharpSyntaxRewriter
                     var txt = t.Type.ToString();
                     return txt == "NavCodeunit" || txt == "NavTestCodeunit" || txt == "NavRecord"
                         || txt == "NavFormExtension" || txt == "NavRecordExtension"
-                        || txt == "NavEventScope" || txt == "NavUpgradeCodeunit";
+                        || txt == "NavEventScope" || txt == "NavUpgradeCodeunit"
+                        || txt == "NavForm";
                 });
                 if (hadRemovedBase)
                 {
@@ -395,6 +408,38 @@ public class RoslynRewriter : CSharpSyntaxRewriter
         }
 
         return visited;
+    }
+
+    // -----------------------------------------------------------------------
+    // Property declarations: rewrite Rec/xRec to MockRecordHandle stubs
+    // -----------------------------------------------------------------------
+    public override SyntaxNode? VisitPropertyDeclaration(PropertyDeclarationSyntax node)
+    {
+        var name = node.Identifier.Text;
+
+        // Rewrite Rec/xRec properties to return a MockRecordHandle(0) stub.
+        // Original: private NavRecord Rec => (NavRecord)this.SourceTable;
+        // Original: private RecordXXX Rec => (RecordXXX)this;
+        // Rewritten: public MockRecordHandle Rec { get; } = new MockRecordHandle(0);
+        if (name == "Rec" || name == "xRec")
+        {
+            // Parse a simple auto-property with a default value
+            var stubProp = SyntaxFactory.PropertyDeclaration(
+                    SyntaxFactory.ParseTypeName("MockRecordHandle"),
+                    SyntaxFactory.Identifier(name))
+                .WithModifiers(SyntaxFactory.TokenList(
+                    SyntaxFactory.Token(SyntaxKind.PublicKeyword)))
+                .WithAccessorList(SyntaxFactory.AccessorList(
+                    SyntaxFactory.SingletonList(
+                        SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
+                            .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken)))))
+                .WithInitializer(SyntaxFactory.EqualsValueClause(
+                    SyntaxFactory.ParseExpression("new MockRecordHandle(0)")))
+                .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
+            return stubProp;
+        }
+
+        return base.VisitPropertyDeclaration(node);
     }
 
     // -----------------------------------------------------------------------
@@ -484,13 +529,36 @@ public class RoslynRewriter : CSharpSyntaxRewriter
         if (text == "NavInterfaceHandle")
             return node.WithIdentifier(SyntaxFactory.Identifier("MockInterfaceHandle"));
 
-        // NavVariant -> object (Variant in AL is just object in standalone)
+        // NavRecordRef -> MockRecordRef (NavRecordRef requires ITreeObject -> NavSession)
+        if (text == "NavRecordRef")
+            return node.WithIdentifier(SyntaxFactory.Identifier("MockRecordRef"));
+
+        // NavVariant -> MockVariant (Variant in AL needs Default/ALAssign methods)
         if (text == "NavVariant")
-            return node.WithIdentifier(SyntaxFactory.Identifier("object"));
+            return node.WithIdentifier(SyntaxFactory.Identifier("MockVariant"));
 
         // NavTextConstant -> NavText (avoid BC runtime initialization)
         if (text == "NavTextConstant")
             return node.WithIdentifier(SyntaxFactory.Identifier("NavText"));
+
+        // NavDialog (instance type) -> MockDialog (for dialog/progress window objects)
+        // Note: NavDialog static calls (ALMessage, ALError) are handled in VisitInvocationExpression
+        if (text == "NavDialog")
+        {
+            // Check if this is in a type context (field/variable declaration, generic arg, etc.)
+            // vs a static member access (NavDialog.ALMessage) which should stay as "NavDialog"
+            var parent = node.Parent;
+            if (parent is MemberAccessExpressionSyntax ma && ma.Expression == node)
+            {
+                // NavDialog.ALMessage -- keep as-is, handled by invocation rewriter
+                // But for NavDialog.ALError, NavDialog.ALMessage these go through AlDialog
+                // Actually check: is this a static method call?
+                var methodName = ma.Name.Identifier.Text;
+                if (methodName == "ALMessage" || methodName == "ALError")
+                    return base.VisitIdentifierName(node); // Keep NavDialog for static rewrite
+            }
+            return node.WithIdentifier(SyntaxFactory.Identifier("MockDialog"));
+        }
 
         // NavEventScope -> object (event scope type used for static fields)
         if (text == "NavEventScope")
@@ -585,22 +653,46 @@ public class RoslynRewriter : CSharpSyntaxRewriter
             }
         }
 
-        // new NavRecordRef(this, SecurityFiltering.XXX) -> new NavRecordRef(null!, SecurityFiltering.XXX)
-        // Replace scope 'this' (ITreeObject) with null since we don't have ITreeObject
-        if (typeText == "NavRecordRef" && visited.ArgumentList != null &&
+        // new MockRecordRef(this, SecurityFiltering.XXX) -> new MockRecordRef()
+        // After identifier replacement, NavRecordRef is now MockRecordRef.
+        // Strip all arguments (ITreeObject and SecurityFiltering) since MockRecordRef is parameterless.
+        if (typeText == "MockRecordRef" && visited.ArgumentList != null &&
             visited.ArgumentList.Arguments.Count >= 1)
+        {
+            return visited.WithArgumentList(SyntaxFactory.ArgumentList());
+        }
+
+        // new MockDialog(this) -> new MockDialog()
+        // After identifier replacement, NavDialog is now MockDialog.
+        // Strip the ITreeObject 'this' argument.
+        if (typeText == "MockDialog" && visited.ArgumentList != null &&
+            visited.ArgumentList.Arguments.Count == 1)
         {
             var firstArgText = visited.ArgumentList.Arguments[0].Expression.ToString();
             if (firstArgText == "this")
             {
-                var newArgs = visited.ArgumentList.Arguments.Replace(
-                    visited.ArgumentList.Arguments[0],
-                    SyntaxFactory.Argument(
-                        SyntaxFactory.PostfixUnaryExpression(
-                            SyntaxKind.SuppressNullableWarningExpression,
-                            SyntaxFactory.LiteralExpression(SyntaxKind.NullLiteralExpression))));
-                return visited.WithArgumentList(SyntaxFactory.ArgumentList(newArgs));
+                return visited.WithArgumentList(SyntaxFactory.ArgumentList());
             }
+        }
+
+        // new NavCode(maxLen, value) -> AlCompat.CreateNavCode(maxLen, value)
+        // NavCode constructor calls EnsureValueIsUppercasedIfNeeded() which triggers NavEnvironment on Linux.
+        // AlCompat.CreateNavCode pre-uppercases the string to avoid NavEnvironment access.
+        if (typeText == "NavCode" && visited.ArgumentList != null &&
+            visited.ArgumentList.Arguments.Count == 2)
+        {
+            var maxLenArg = visited.ArgumentList.Arguments[0].Expression;
+            var valueArg = visited.ArgumentList.Arguments[1].Expression;
+            return SyntaxFactory.InvocationExpression(
+                SyntaxFactory.MemberAccessExpression(
+                    SyntaxKind.SimpleMemberAccessExpression,
+                    SyntaxFactory.IdentifierName("AlCompat"),
+                    SyntaxFactory.IdentifierName("CreateNavCode")),
+                SyntaxFactory.ArgumentList(
+                    SyntaxFactory.SeparatedList(new[] {
+                        SyntaxFactory.Argument(maxLenArg),
+                        SyntaxFactory.Argument(valueArg)
+                    })));
         }
 
         // new NavTextConstant(langIds, strings, null, null) -> new NavText(strings[0])
@@ -752,6 +844,26 @@ public class RoslynRewriter : CSharpSyntaxRewriter
                 return visited;
             }
 
+            // NavCodeunit.RunCodeunit(DataError, id, record) -> MockCodeunitHandle.RunCodeunit(id)
+            // NavCodeunit.RunCodeunit is a static dispatch method requiring NavSession
+            if (exprText == "NavCodeunit" && methodName == "RunCodeunit")
+            {
+                var args = visited.ArgumentList.Arguments;
+                if (args.Count >= 2)
+                {
+                    // The second argument is the codeunit ID
+                    var codeunitIdArg = args[1].Expression;
+                    return SyntaxFactory.InvocationExpression(
+                        SyntaxFactory.MemberAccessExpression(
+                            SyntaxKind.SimpleMemberAccessExpression,
+                            SyntaxFactory.IdentifierName("MockCodeunitHandle"),
+                            SyntaxFactory.IdentifierName("RunCodeunit")),
+                        SyntaxFactory.ArgumentList(
+                            SyntaxFactory.SingletonSeparatedList(
+                                SyntaxFactory.Argument(codeunitIdArg))));
+                }
+            }
+
             // NCLEnumMetadata.Create(N) -> NCLOptionMetadata.Default
             // NCLEnumMetadata.Create goes through NavGlobal.MetadataProvider -> NavEnvironment
             // NCLOptionMetadata.Default creates a simple default metadata without NavGlobal access
@@ -830,6 +942,17 @@ public class RoslynRewriter : CSharpSyntaxRewriter
                         SyntaxFactory.IdentifierName("ObjectToDecimal")));
             }
 
+            // ALCompiler.NavIndirectValueToNavValue<T>(x) -> AlCompat.NavIndirectValueToNavValue<T>(x)
+            if (exprText == "ALCompiler" && methodName == "NavIndirectValueToNavValue")
+            {
+                // Preserve the generic type arguments (e.g., <NavText>)
+                return visited.WithExpression(
+                    SyntaxFactory.MemberAccessExpression(
+                        SyntaxKind.SimpleMemberAccessExpression,
+                        SyntaxFactory.IdentifierName("AlCompat"),
+                        memberAccess.Name)); // keep GenericNameSyntax with type args
+            }
+
             // ALCompiler.NavIndirectValueToINavRecordHandle(x) -> (MockRecordHandle)x
             if (exprText == "ALCompiler" && methodName == "NavIndirectValueToINavRecordHandle")
             {
@@ -855,6 +978,24 @@ public class RoslynRewriter : CSharpSyntaxRewriter
                             SyntaxFactory.IdentifierName("ToVariant")),
                         SyntaxFactory.ArgumentList(
                             SyntaxFactory.SingletonSeparatedList(valueArg)));
+                }
+            }
+
+            // NavInStream.Default(this) -> NavInStream.Default(null!)
+            // NavOutStream.Default(this) -> NavOutStream.Default(null!)
+            // NavFieldRef.Default(this) -> NavFieldRef.Default(null!)
+            // These BC types require ITreeObject but work with null in standalone mode.
+            if ((exprText == "NavInStream" || exprText == "NavOutStream" || exprText == "NavFieldRef")
+                && methodName == "Default")
+            {
+                var args = visited.ArgumentList.Arguments;
+                if (args.Count == 1 && args[0].Expression.ToString() == "this")
+                {
+                    var nullBang = SyntaxFactory.PostfixUnaryExpression(
+                        SyntaxKind.SuppressNullableWarningExpression,
+                        SyntaxFactory.LiteralExpression(SyntaxKind.NullLiteralExpression));
+                    return visited.WithArgumentList(SyntaxFactory.ArgumentList(
+                        SyntaxFactory.SingletonSeparatedList(SyntaxFactory.Argument(nullBang))));
                 }
             }
 

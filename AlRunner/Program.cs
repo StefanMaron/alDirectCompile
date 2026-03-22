@@ -528,26 +528,14 @@ public static class AlTranspiler
                 }
             }
 
-            // Try NavxManifest.xml (for .app file inputs)
+            // Try NavxManifest.xml (for .app file inputs, including Ready2Run packages)
             if (inputPath.EndsWith(".app", StringComparison.OrdinalIgnoreCase) && File.Exists(inputPath))
             {
                 try
                 {
-                    var fileBytes = File.ReadAllBytes(inputPath);
-                    int zipOffset = 0;
-                    if (fileBytes.Length >= 8 && fileBytes[0] == (byte)'N' && fileBytes[1] == (byte)'A'
-                        && fileBytes[2] == (byte)'V' && fileBytes[3] == (byte)'X')
+                    var doc = LoadNavxManifest(inputPath);
+                    if (doc != null)
                     {
-                        zipOffset = (int)BitConverter.ToUInt32(fileBytes, 4);
-                    }
-
-                    using var zipStream = new MemoryStream(fileBytes, zipOffset, fileBytes.Length - zipOffset);
-                    using var zip = new ZipArchive(zipStream, ZipArchiveMode.Read);
-                    var manifestEntry = zip.GetEntry("NavxManifest.xml");
-                    if (manifestEntry != null)
-                    {
-                        using var stream = manifestEntry.Open();
-                        var doc = XDocument.Load(stream);
                         XNamespace ns = "http://schemas.microsoft.com/navx/2015/manifest";
                         var appElement = doc.Root?.Element(ns + "App");
                         if (appElement != null)
@@ -727,8 +715,67 @@ public static class AlTranspiler
     }
 
     /// <summary>
+    /// Open a ZIP archive from an .app file, handling the NAVX header.
+    /// Returns the byte array and zip offset so the caller can create a ZipArchive.
+    /// </summary>
+    private static (byte[] Data, int ZipOffset) ReadAppFile(byte[] fileBytes)
+    {
+        int zipOffset = 0;
+        if (fileBytes.Length >= 8
+            && fileBytes[0] == (byte)'N' && fileBytes[1] == (byte)'A'
+            && fileBytes[2] == (byte)'V' && fileBytes[3] == (byte)'X')
+        {
+            zipOffset = (int)BitConverter.ToUInt32(fileBytes, 4);
+        }
+        return (fileBytes, zipOffset);
+    }
+
+    /// <summary>
+    /// Load NavxManifest.xml from an .app file, handling Ready2Run packages (nested .app).
+    /// Returns the parsed XDocument or null if no manifest is found.
+    /// </summary>
+    private static XDocument? LoadNavxManifest(string appPath)
+    {
+        var fileBytes = File.ReadAllBytes(appPath);
+        var (data, zipOffset) = ReadAppFile(fileBytes);
+
+        using var zipStream = new MemoryStream(data, zipOffset, data.Length - zipOffset);
+        using var zip = new ZipArchive(zipStream, ZipArchiveMode.Read);
+        var manifestEntry = zip.GetEntry("NavxManifest.xml");
+
+        if (manifestEntry == null)
+        {
+            // Ready2Run package: look for nested .app file
+            var nestedApp = zip.Entries.FirstOrDefault(e =>
+                e.FullName.EndsWith(".app", StringComparison.OrdinalIgnoreCase) && !e.FullName.Contains('/'));
+            if (nestedApp != null)
+            {
+                using var nestedStream = nestedApp.Open();
+                using var ms = new MemoryStream();
+                nestedStream.CopyTo(ms);
+                var nestedBytes = ms.ToArray();
+                var (nestedData, nestedOffset) = ReadAppFile(nestedBytes);
+
+                using var nestedZipStream = new MemoryStream(nestedData, nestedOffset, nestedData.Length - nestedOffset);
+                using var nestedZip = new ZipArchive(nestedZipStream, ZipArchiveMode.Read);
+                manifestEntry = nestedZip.GetEntry("NavxManifest.xml");
+                if (manifestEntry != null)
+                {
+                    using var stream = manifestEntry.Open();
+                    return XDocument.Load(stream);
+                }
+            }
+            return null;
+        }
+
+        using var directStream = manifestEntry.Open();
+        return XDocument.Load(directStream);
+    }
+
+    /// <summary>
     /// Parse NavxManifest.xml from an .app file to extract platform/application versions and dependencies.
     /// Platform/application specs go into platformSpecs; actual deps go into specs.
+    /// Handles Ready2Run packages (nested .app) automatically.
     /// </summary>
     private static void ParseNavxManifest(string appPath, List<SymbolReferenceSpecification> specs,
         List<SymbolReferenceSpecification> platformSpecs,
@@ -736,22 +783,8 @@ public static class AlTranspiler
     {
         try
         {
-            var fileBytes = File.ReadAllBytes(appPath);
-            int zipOffset = 0;
-            if (fileBytes.Length >= 8
-                && fileBytes[0] == (byte)'N' && fileBytes[1] == (byte)'A'
-                && fileBytes[2] == (byte)'V' && fileBytes[3] == (byte)'X')
-            {
-                zipOffset = (int)BitConverter.ToUInt32(fileBytes, 4);
-            }
-
-            using var zipStream = new MemoryStream(fileBytes, zipOffset, fileBytes.Length - zipOffset);
-            using var zip = new ZipArchive(zipStream, ZipArchiveMode.Read);
-            var manifestEntry = zip.GetEntry("NavxManifest.xml");
-            if (manifestEntry == null) return;
-
-            using var stream = manifestEntry.Open();
-            var doc = XDocument.Load(stream);
+            var doc = LoadNavxManifest(appPath);
+            if (doc == null) return;
             XNamespace ns = "http://schemas.microsoft.com/navx/2015/manifest";
 
             var appElement = doc.Root?.Element(ns + "App");
@@ -815,8 +848,10 @@ public static class RoslynCompiler
 
     public static Assembly? Compile(List<string> csharpSources)
     {
-        var syntaxTrees = csharpSources.Select(src =>
-            Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(src)).ToList();
+        // Give each source a distinct file path so error-producing sources can be identified and excluded
+        var syntaxTrees = csharpSources.Select((src, idx) =>
+            Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(
+                src, path: $"source_{idx}.cs")).ToList();
 
         var references = new List<Microsoft.CodeAnalysis.MetadataReference>();
 
@@ -870,6 +905,51 @@ public static class RoslynCompiler
             Console.Error.WriteLine($"Roslyn compilation failed ({errors.Count} errors):");
             foreach (var d in errors.Take(30))
                 Console.Error.WriteLine($"  {d}");
+
+            // Fallback: try removing syntax trees that contain errors and recompile.
+            // This allows non-test code (Pages, export codeunits) to fail without blocking tests.
+            var errorTreePaths = errors
+                .Select(d => d.Location.SourceTree?.FilePath)
+                .Where(p => p != null)
+                .Distinct()
+                .ToHashSet();
+
+            if (errorTreePaths.Count > 0 && errorTreePaths.Count < syntaxTrees.Count)
+            {
+                var cleanTrees = syntaxTrees
+                    .Where(t => !errorTreePaths.Contains(t.FilePath))
+                    .ToList();
+                Console.Error.WriteLine(
+                    $"Retrying compilation without {syntaxTrees.Count - cleanTrees.Count} error-producing source(s) ({cleanTrees.Count} remaining)...");
+
+                var retryCompilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                    "AlRunnerGenerated",
+                    cleanTrees,
+                    references,
+                    new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(
+                        Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary)
+                        .WithAllowUnsafe(true));
+
+                using var retryMs = new MemoryStream();
+                var retryResult = retryCompilation.Emit(retryMs);
+
+                if (retryResult.Success)
+                {
+                    Console.Error.WriteLine("Retry succeeded.");
+                    retryMs.Seek(0, SeekOrigin.Begin);
+                    return Assembly.Load(retryMs.ToArray());
+                }
+                else
+                {
+                    var retryErrors = retryResult.Diagnostics
+                        .Where(d => d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error)
+                        .ToList();
+                    Console.Error.WriteLine($"Retry also failed ({retryErrors.Count} errors):");
+                    foreach (var d in retryErrors.Take(10))
+                        Console.Error.WriteLine($"  {d}");
+                }
+            }
+
             return null;
         }
 

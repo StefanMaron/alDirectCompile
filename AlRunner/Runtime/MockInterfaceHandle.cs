@@ -26,4 +26,31 @@ public class MockInterfaceHandle
     {
         _implementation = null;
     }
+
+    /// <summary>
+    /// Invoke a method on the interface implementation by member ID.
+    /// Similar to MockCodeunitHandle.Invoke but via the interface dispatch pattern.
+    /// In BC, InvokeInterfaceMethod dispatches through the codeunit's IsInterfaceMethod table.
+    /// </summary>
+    public object? InvokeInterfaceMethod(int memberId, object[] args)
+    {
+        if (_implementation == null)
+            throw new InvalidOperationException("Interface not assigned");
+
+        // If the implementation is a MockCodeunitHandle, delegate to it
+        if (_implementation is MockCodeunitHandle handle)
+            return handle.Invoke(memberId, args);
+
+        throw new NotSupportedException(
+            $"Interface dispatch not supported for implementation type {_implementation.GetType().Name}");
+    }
+
+    /// <summary>
+    /// 3-arg overload: InvokeInterfaceMethod(interfaceId, memberId, args)
+    /// The interfaceId identifies which interface is being called (ignored in standalone mode).
+    /// </summary>
+    public object? InvokeInterfaceMethod(int interfaceId, int memberId, object[] args)
+    {
+        return InvokeInterfaceMethod(memberId, args);
+    }
 }
