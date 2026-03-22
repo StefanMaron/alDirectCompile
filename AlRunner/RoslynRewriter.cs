@@ -57,8 +57,9 @@ public class RoslynRewriter : CSharpSyntaxRewriter
         "ALInit", "ALInsert", "ALModify", "ALGet", "ALFind", "ALNext", "ALDelete",
         "ALDeleteAll", "ALCount", "ALSetRange", "ALSetFilter", "ALFindSet",
         "ALFindFirst", "ALFindLast", "ALIsEmpty", "ALCalcFields", "ALSetCurrentKey",
-        "ALReset", "ALCopy", "ALTestField", "ALValidate", "ALRename",
-        "ALLockTable", "ALCalcSums",
+        "ALReset", "ALCopy", "ALTestField", "ALTestFieldSafe", "ALValidate", "ALValidateSafe", "ALRename",
+        "ALLockTable", "ALCalcSums", "ALSetLoadFields", "ALFieldCaption", "ALSetRecFilter",
+        "ALTableCaption", "ALTableName", "ALTestFieldNavValueSafe",
         "SetFieldValueSafe", "GetFieldValueSafe", "GetFieldRefSafe",
     };
 
@@ -495,7 +496,41 @@ public class RoslynRewriter : CSharpSyntaxRewriter
         if (text == "NavEventScope")
             return node.WithIdentifier(SyntaxFactory.Identifier("object"));
 
+        // NavTestPageHandle -> MockTestPageHandle (avoid ambiguity with BC runtime type)
+        if (text == "NavTestPageHandle")
+            return node.WithIdentifier(SyntaxFactory.Identifier("MockTestPageHandle"));
+
+        // NavTestFieldHandle -> MockTestFieldHandle
+        if (text == "NavTestFieldHandle")
+            return node.WithIdentifier(SyntaxFactory.Identifier("MockTestFieldHandle"));
+
+        // NavTestActionHandle -> MockTestActionHandle
+        if (text == "NavTestActionHandle")
+            return node.WithIdentifier(SyntaxFactory.Identifier("MockTestActionHandle"));
+
         return base.VisitIdentifierName(node);
+    }
+
+    // -----------------------------------------------------------------------
+    // Generic names: NavArray<MockRecordHandle> -> MockRecordArray
+    // -----------------------------------------------------------------------
+    public override SyntaxNode? VisitGenericName(GenericNameSyntax node)
+    {
+        var visited = (GenericNameSyntax)base.VisitGenericName(node)!;
+
+        // NavArray<MockRecordHandle> -> MockRecordArray
+        // NavArray<INavRecordHandle> -> MockRecordArray (INavRecordHandle already rewritten to MockRecordHandle)
+        if (visited.Identifier.Text == "NavArray" &&
+            visited.TypeArgumentList.Arguments.Count == 1)
+        {
+            var typeArg = visited.TypeArgumentList.Arguments[0].ToString();
+            if (typeArg == "MockRecordHandle")
+            {
+                return SyntaxFactory.IdentifierName("MockRecordArray");
+            }
+        }
+
+        return visited;
     }
 
     // -----------------------------------------------------------------------
@@ -591,6 +626,59 @@ public class RoslynRewriter : CSharpSyntaxRewriter
                     .WithArgumentList(SyntaxFactory.ArgumentList(
                         SyntaxFactory.SingletonSeparatedList(
                             SyntaxFactory.Argument(arrCreate.Initializer.Expressions[0]))));
+            }
+        }
+
+        // new NavTestPageHandle(this, pageId) -> new MockTestPageHandle(pageId)
+        // After identifier replacement, the type is MockTestPageHandle
+        // Strip the ITreeObject 'this' argument from constructor
+        if (typeText == "MockTestPageHandle" && visited.ArgumentList != null &&
+            visited.ArgumentList.Arguments.Count == 2)
+        {
+            var firstArgText = visited.ArgumentList.Arguments[0].Expression.ToString();
+            if (firstArgText == "this")
+            {
+                var pageId = visited.ArgumentList.Arguments[1].Expression;
+                return visited.WithArgumentList(SyntaxFactory.ArgumentList(
+                    SyntaxFactory.SingletonSeparatedList(
+                        SyntaxFactory.Argument(pageId))));
+            }
+        }
+
+        // new NavArray<MockRecordHandle>(new MockRecordHandle.Factory2(this, tableId, false, SecurityFiltering.X), N)
+        // -> new MockRecordArray(tableId, N)
+        // Also matches after GenericName rewrite: new MockRecordArray(new MockRecordHandle.Factory2(...), N)
+        // NavArray<T> requires IFactory<T> which is internal; use our MockRecordArray instead
+        if ((typeText.StartsWith("NavArray<") || typeText == "MockRecordArray") &&
+            visited.ArgumentList != null && visited.ArgumentList.Arguments.Count == 2)
+        {
+            var factoryArg = visited.ArgumentList.Arguments[0].Expression;
+            var sizeArg = visited.ArgumentList.Arguments[1].Expression;
+
+            // Extract the table ID from the Factory2 constructor call
+            if (factoryArg is ObjectCreationExpressionSyntax factoryCreation &&
+                factoryCreation.Type.ToString().Contains("Factory2") &&
+                factoryCreation.ArgumentList != null)
+            {
+                // Factory2(this, tableId, false, SecurityFiltering.X) — tableId is arg[1]
+                // or Factory2(tableId, false, SecurityFiltering.X) — tableId is arg[0]
+                var factoryArgs = factoryCreation.ArgumentList.Arguments;
+                ExpressionSyntax? tableIdExpr = null;
+                if (factoryArgs.Count >= 4)
+                    tableIdExpr = factoryArgs[1].Expression; // (this, tableId, ...)
+                else if (factoryArgs.Count >= 1)
+                    tableIdExpr = factoryArgs[0].Expression; // (tableId, ...)
+
+                if (tableIdExpr != null)
+                {
+                    return SyntaxFactory.ObjectCreationExpression(
+                        SyntaxFactory.ParseTypeName("MockRecordArray"))
+                        .WithArgumentList(SyntaxFactory.ArgumentList(
+                            SyntaxFactory.SeparatedList(new[] {
+                                SyntaxFactory.Argument(tableIdExpr),
+                                SyntaxFactory.Argument(sizeArg)
+                            })));
+                }
             }
         }
 
@@ -768,6 +856,58 @@ public class RoslynRewriter : CSharpSyntaxRewriter
                         SyntaxFactory.ArgumentList(
                             SyntaxFactory.SingletonSeparatedList(valueArg)));
                 }
+            }
+
+            // ALSystemDate.ALWorkDate(null!) -> ALSystemDate.ALWorkDate(NavDate.Default)
+            // The rewriter turns this.Session -> null!, which makes ALWorkDate ambiguous between
+            // the NavSession and NavDate overloads. We disambiguate to the NavDate overload.
+            if (exprText == "ALSystemDate" && methodName == "ALWorkDate")
+            {
+                var args = visited.ArgumentList.Arguments;
+                if (args.Count == 1)
+                {
+                    var argText = args[0].Expression.ToString();
+                    // Match null!, default! or similar null patterns from Session rewriting
+                    if (argText.Contains("null"))
+                    {
+                        return SyntaxFactory.InvocationExpression(
+                            visited.Expression,
+                            SyntaxFactory.ArgumentList(
+                                SyntaxFactory.SingletonSeparatedList(
+                                    SyntaxFactory.Argument(
+                                        SyntaxFactory.DefaultExpression(
+                                            SyntaxFactory.ParseTypeName("NavDate"))))));
+                    }
+                }
+            }
+
+            // ALCompiler.NavRecordToVariant(this, record) -> AlCompat.ToVariant(record)
+            // Strip the ITreeObject first argument
+            if (exprText == "ALCompiler" && methodName == "NavRecordToVariant")
+            {
+                var args = visited.ArgumentList.Arguments;
+                if (args.Count >= 2)
+                {
+                    var recordArg = args[1];
+                    return SyntaxFactory.InvocationExpression(
+                        SyntaxFactory.MemberAccessExpression(
+                            SyntaxKind.SimpleMemberAccessExpression,
+                            SyntaxFactory.IdentifierName("AlCompat"),
+                            SyntaxFactory.IdentifierName("ToVariant")),
+                        SyntaxFactory.ArgumentList(
+                            SyntaxFactory.SingletonSeparatedList(recordArg)));
+                }
+            }
+
+            // ALCompiler.ObjectToInt32(x) -> Convert.ToInt32(x)
+            // Simple numeric conversion
+            if (exprText == "ALCompiler" && methodName == "ObjectToInt32")
+            {
+                return visited.WithExpression(
+                    SyntaxFactory.MemberAccessExpression(
+                        SyntaxKind.SimpleMemberAccessExpression,
+                        SyntaxFactory.IdentifierName("Convert"),
+                        SyntaxFactory.IdentifierName("ToInt32")));
             }
 
             // ALCompiler.ObjectToBoolean(x) -> AlCompat.ObjectToBoolean(x)

@@ -351,6 +351,182 @@ public class MockRecordHandle
         return 0;
     }
 
+    // -----------------------------------------------------------------------
+    // Validate — sets field value (triggers are not implemented)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// AL's VALIDATE(FieldNo, Value) — sets the field and would fire OnValidate trigger.
+    /// In standalone mode we just set the value since we don't have trigger infrastructure.
+    /// </summary>
+    public void ALValidateSafe(int fieldNo, NavType expectedType, NavValue value)
+    {
+        _fields[fieldNo] = value;
+    }
+
+    /// <summary>
+    /// ALValidate overload matching transpiler output pattern: ALValidate(DataError, fieldNo, NavType, value)
+    /// </summary>
+    public void ALValidate(DataError errorLevel, int fieldNo, NavType expectedType, NavValue value)
+    {
+        _fields[fieldNo] = value;
+    }
+
+    // -----------------------------------------------------------------------
+    // TestField — asserts field has expected value
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// AL's TESTFIELD(FieldNo, Value) — asserts the field equals the expected value.
+    /// </summary>
+    public void ALTestFieldSafe(int fieldNo, NavType expectedType, NavValue expectedValue)
+    {
+        var actual = GetFieldValueSafe(fieldNo, expectedType);
+        var actualStr = NavValueToString(actual);
+        var expectedStr = NavValueToString(expectedValue);
+        if (actualStr != expectedStr)
+            throw new Exception($"TestField failed: field {fieldNo} in table {_tableId} expected '{expectedStr}' but was '{actualStr}'");
+    }
+
+    /// <summary>AL's TestField for NavValue comparisons (used in some transpiler patterns).</summary>
+    public void ALTestFieldNavValueSafe(int fieldNo, NavType expectedType, NavValue expectedValue)
+    {
+        ALTestFieldSafe(fieldNo, expectedType, expectedValue);
+    }
+
+    /// <summary>Overload: TestField with DataError level.</summary>
+    public void ALTestField(DataError errorLevel, int fieldNo, NavType expectedType, NavValue expectedValue)
+    {
+        ALTestFieldSafe(fieldNo, expectedType, expectedValue);
+    }
+
+    /// <summary>
+    /// AL's TESTFIELD(FieldNo) — asserts the field is non-empty/non-default.
+    /// </summary>
+    public void ALTestField(DataError errorLevel, int fieldNo, NavType expectedType)
+    {
+        var actual = GetFieldValueSafe(fieldNo, expectedType);
+        var actualStr = NavValueToString(actual);
+        var defaultStr = NavValueToString(DefaultForType(expectedType));
+        if (actualStr == defaultStr)
+            throw new Exception($"TestField failed: field {fieldNo} in table {_tableId} must have a value");
+    }
+
+    // -----------------------------------------------------------------------
+    // CalcFields / CalcSums — stubs (no SQL aggregation available)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// AL's CALCFIELDS — calculates FlowFields. No-op in standalone mode since we don't
+    /// have the underlying SQL/CalcFormula infrastructure. The field retains its current value.
+    /// </summary>
+    public void ALCalcFields(DataError errorLevel, params int[] fieldNos)
+    {
+        // No-op: FlowFields not supported in standalone mode
+    }
+
+    /// <summary>
+    /// AL's CALCSUMS — calculates sum of specified fields across filtered records.
+    /// Returns true; the actual sum is not computed (would need field metadata to know types).
+    /// </summary>
+    public bool ALCalcSums(DataError errorLevel, params int[] fieldNos)
+    {
+        // No-op stub: real implementation would sum over filtered records
+        return true;
+    }
+
+    // -----------------------------------------------------------------------
+    // SetLoadFields — performance hint, no-op in standalone mode
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// AL's SETLOADFIELDS — tells the runtime to only load specified fields from SQL.
+    /// No-op in standalone mode since all fields are always in memory.
+    /// </summary>
+    public void ALSetLoadFields(params int[] fieldNos)
+    {
+        // No-op: all fields always loaded in in-memory store
+    }
+
+    // -----------------------------------------------------------------------
+    // FieldCaption — returns field name (stubbed)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// AL's FIELDCAPTION — returns the caption of a field. Returns a placeholder
+    /// since we don't have metadata infrastructure.
+    /// </summary>
+    public NavText ALFieldCaption(int fieldNo)
+    {
+        return new NavText($"Field{fieldNo}");
+    }
+
+    // -----------------------------------------------------------------------
+    // LockTable — no-op in standalone mode
+    // -----------------------------------------------------------------------
+
+    public void ALLockTable(DataError errorLevel = DataError.ThrowError)
+    {
+        // No-op: no SQL transaction isolation needed
+    }
+
+    // -----------------------------------------------------------------------
+    // Copy — copies field values and filters from another record handle
+    // -----------------------------------------------------------------------
+
+    public void ALCopy(MockRecordHandle source, bool shareFilters = false)
+    {
+        _fields = new Dictionary<int, NavValue>(source._fields);
+        if (shareFilters)
+        {
+            // Copy filters too
+            _filters.Clear();
+            foreach (var kv in source._filters)
+                _filters[kv.Key] = kv.Value;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rename — stub
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// AL's SETRECFILTER — sets a filter based on the current record's primary key values.
+    /// In standalone mode, sets a range filter on field 1 using the current PK value.
+    /// </summary>
+    public void ALSetRecFilter()
+    {
+        if (_fields.TryGetValue(1, out var pkValue))
+        {
+            _filters[1] = new FieldFilter
+            {
+                FieldNo = 1,
+                FromValue = pkValue,
+                ToValue = pkValue,
+                IsRangeFilter = true,
+            };
+        }
+    }
+
+    /// <summary>
+    /// AL's TABLECAPTION — returns the caption of the table.
+    /// Returns a placeholder since we don't have metadata.
+    /// </summary>
+    public string ALTableCaption => $"Table{_tableId}";
+
+    /// <summary>
+    /// AL's TABLENAME — returns the name of the table.
+    /// </summary>
+    public string ALTableName => $"Table{_tableId}";
+
+    public bool ALRename(DataError errorLevel, params NavValue[] newKeyValues)
+    {
+        // Stub: just update field 1 with new key
+        if (newKeyValues.Length > 0)
+            _fields[1] = newKeyValues[0];
+        return true;
+    }
+
     // =======================================================================
     // Filter infrastructure
     // =======================================================================
@@ -681,4 +857,5 @@ public class MockRecordHandle
             _ => NavText.Default(0)
         };
     }
+
 }
