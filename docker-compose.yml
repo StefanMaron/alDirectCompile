@@ -35,6 +35,8 @@ services:
       SQL_SERVER: sql
     volumes:
       - bc-artifacts:/bc/artifacts
+      - bc-service:/bc/service
 
 volumes:
   bc-artifacts:
+  bc-service:

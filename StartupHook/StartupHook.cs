@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
@@ -93,6 +94,11 @@ internal class StartupHook
         {
             Console.WriteLine("[StartupHook] Nav.Ncl.dll loaded — patching");
             PatchNavEnvironment(args.LoadedAssembly);
+        }
+
+        if (name == "Microsoft.Dynamics.Nav.Watson")
+        {
+            PatchWatsonReporting(args.LoadedAssembly);
         }
 
         // Re-apply encryption bypass after Main() overrides it.
@@ -359,6 +365,31 @@ internal class StartupHook
     // ========================================================================
     // Patch #4: NavTypes — no-op EventLog writer
     // ========================================================================
+
+    // ========================================================================
+    // Patch #13: Watson crash reporting (requires Windows registry)
+    // ========================================================================
+    private static void PatchWatsonReporting(Assembly watsonAsm)
+    {
+        try
+        {
+            var sendReport = watsonAsm.GetType("Microsoft.Dynamics.Nav.Watson.WatsonReporting")
+                ?.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+                .FirstOrDefault(m => m.Name == "SendReport");
+            if (sendReport != null)
+            {
+                var noop = typeof(StartupHook).GetMethod(nameof(WatsonSendReportNoop),
+                    BindingFlags.Static | BindingFlags.NonPublic);
+                ApplyJmpHook(sendReport, noop!, "WatsonReporting.SendReport");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Watson patch failed: {ex.Message}");
+        }
+    }
+
+    private static void WatsonSendReportNoop() { }
 
     private static void PatchNavTypes(Assembly navTypes)
     {
