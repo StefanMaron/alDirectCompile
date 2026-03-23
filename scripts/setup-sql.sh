@@ -13,7 +13,9 @@ echo "SQL Server ready."
 # Create login with blank password for BC
 docker compose exec sql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Passw0rd123!' -C -No -Q "
 IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = 'bctest')
-    CREATE LOGIN bctest WITH PASSWORD = '', CHECK_POLICY = OFF, CHECK_EXPIRATION = OFF;
+    CREATE LOGIN bctest WITH PASSWORD = 'Test1234', CHECK_POLICY = OFF, CHECK_EXPIRATION = OFF;
+ELSE
+    ALTER LOGIN bctest WITH PASSWORD = 'Test1234', CHECK_POLICY = OFF, CHECK_EXPIRATION = OFF;
 ALTER SERVER ROLE sysadmin ADD MEMBER bctest;
 "
 echo "Login 'bctest' ready."

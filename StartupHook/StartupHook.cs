@@ -554,39 +554,70 @@ internal class StartupHook
     {
         try
         {
-            // Find the factory in already-loaded Nav.Types assembly
+            // Find Nav.Types and Nav.Core assemblies
+            Assembly? navTypesAsm = null;
+            Assembly? navCoreAsm = null;
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
             {
-                if (asm.GetName().Name != "Microsoft.Dynamics.Nav.Types") continue;
+                if (asm.GetName().Name == "Microsoft.Dynamics.Nav.Types") navTypesAsm = asm;
+                if (asm.GetName().Name == "Microsoft.Dynamics.Nav.Core") navCoreAsm = asm;
+            }
+            if (navTypesAsm == null) return;
 
-                Type? factoryType = asm.GetType("Microsoft.Dynamics.Nav.Types.DefaultServerInstanceRsaEncryptionProviderFactory");
-                if (factoryType == null) break;
+            Type? encIfaceType = navTypesAsm.GetType("Microsoft.Dynamics.Nav.Types.ISystemEncryptionProvider");
+            if (encIfaceType == null) return;
 
+            var createProxy = typeof(DispatchProxy)
+                .GetMethod("Create", 2, Type.EmptyTypes)!
+                .MakeGenericMethod(encIfaceType, typeof(PassthroughEncryptionProxy));
+            _noopEncryptionProvider = createProxy.Invoke(null, null);
+
+            // Strategy 1: Set the factory delegate
+            Type? factoryType = navTypesAsm.GetType("Microsoft.Dynamics.Nav.Types.DefaultServerInstanceRsaEncryptionProviderFactory");
+            if (factoryType != null)
+            {
                 var prop = factoryType.GetProperty("GetDefaultEncryptionProvider",
                     BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
-                if (prop == null) break;
-
-                // Re-read the current value and replace with our proxy
-                Type? encIfaceType = asm.GetType("Microsoft.Dynamics.Nav.Types.ISystemEncryptionProvider");
-                if (encIfaceType == null) break;
-
-                var createProxy = typeof(DispatchProxy)
-                    .GetMethod("Create", 2, Type.EmptyTypes)!
-                    .MakeGenericMethod(encIfaceType, typeof(PassthroughEncryptionProxy));
-                _noopEncryptionProvider = createProxy.Invoke(null, null);
-
-                var funcType = typeof(Func<>).MakeGenericType(encIfaceType);
-                var dm = new DynamicMethod("GetNoOpEncryption2", encIfaceType, Type.EmptyTypes,
-                    typeof(StartupHook).Module, skipVisibility: true);
-                var il = dm.GetILGenerator();
-                il.Emit(OpCodes.Ldsfld, typeof(StartupHook).GetField(nameof(_noopEncryptionProvider),
-                    BindingFlags.Static | BindingFlags.NonPublic)!);
-                il.Emit(OpCodes.Ret);
-                prop.SetValue(null, dm.CreateDelegate(funcType));
-
-                Console.WriteLine("[StartupHook] Re-applied encryption bypass (after Nav.Core load)");
-                break;
+                if (prop != null)
+                {
+                    var funcType = typeof(Func<>).MakeGenericType(encIfaceType);
+                    var dm = new DynamicMethod("GetNoOpEncryption2", encIfaceType, Type.EmptyTypes,
+                        typeof(StartupHook).Module, skipVisibility: true);
+                    var il = dm.GetILGenerator();
+                    il.Emit(OpCodes.Ldsfld, typeof(StartupHook).GetField(nameof(_noopEncryptionProvider),
+                        BindingFlags.Static | BindingFlags.NonPublic)!);
+                    il.Emit(OpCodes.Ret);
+                    prop.SetValue(null, dm.CreateDelegate(funcType));
+                }
             }
+
+            // Strategy 2: Also replace ServerInstanceRsaEncryptionProvider.Instance
+            // Main() sets the factory to () => ServerInstanceRsaEncryptionProvider.Instance
+            // If we replace Instance with our proxy, the factory returns our proxy
+            if (navCoreAsm != null)
+            {
+                Type? rsaProvType = navCoreAsm.GetType("Microsoft.Dynamics.Nav.Core.ServerInstanceRsaEncryptionProvider");
+                if (rsaProvType != null)
+                {
+                    var instanceField = rsaProvType.GetField("instance",
+                        BindingFlags.Static | BindingFlags.NonPublic);
+                    var instanceProp = rsaProvType.GetProperty("Instance",
+                        BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+
+                    if (instanceField != null)
+                    {
+                        instanceField.SetValue(null, _noopEncryptionProvider);
+                        Console.WriteLine("[StartupHook] Replaced ServerInstanceRsaEncryptionProvider.Instance");
+                    }
+                    else if (instanceProp?.SetMethod != null)
+                    {
+                        instanceProp.SetValue(null, _noopEncryptionProvider);
+                        Console.WriteLine("[StartupHook] Replaced ServerInstanceRsaEncryptionProvider.Instance (via property)");
+                    }
+                }
+            }
+
+            Console.WriteLine("[StartupHook] Re-applied encryption bypass (after Nav.Core load)");
         }
         catch (Exception ex)
         {
