@@ -20,11 +20,14 @@ SERVICE_DIR="/bc/service"
 if [ ! -f "$ARTIFACTS/app/manifest.json" ]; then
     if [ "$BC_ARTIFACT_URL" = "skip" ]; then
         echo "[entrypoint] Waiting for artifacts to be provided externally..."
+        # Wait for BOTH app manifest AND platform ServiceTier to be present
         for i in $(seq 1 120); do
-            [ -f "$ARTIFACTS/app/manifest.json" ] && break
+            [ -f "$ARTIFACTS/app/manifest.json" ] && \
+            [ -d "$ARTIFACTS/platform/ServiceTier" ] && break
             sleep 2
         done
-        [ -f "$ARTIFACTS/app/manifest.json" ] || { echo "[entrypoint] ERROR: Artifacts not provided"; exit 1; }
+        [ -f "$ARTIFACTS/app/manifest.json" ] || { echo "[entrypoint] ERROR: App artifacts not provided"; exit 1; }
+        [ -d "$ARTIFACTS/platform/ServiceTier" ] || { echo "[entrypoint] ERROR: Platform artifacts not provided"; ls -la "$ARTIFACTS/platform/" 2>/dev/null; exit 1; }
     elif [ -n "$BC_ARTIFACT_URL" ]; then
         echo "[entrypoint] Downloading BC from $BC_ARTIFACT_URL..."
         /bc/scripts/download-artifacts.sh "$BC_ARTIFACT_URL" "$ARTIFACTS"
