@@ -32,8 +32,6 @@ services:
       - bc-cache:/usr/share/Microsoft/Microsoft Dynamics NAV/270/Server
     tmpfs:
       - /tmp:size=512m
-    environment:
-      DOTNET_STARTUP_HOOKS: /bc/hook/StartupHook.dll
 
 volumes:
   bc-cache:

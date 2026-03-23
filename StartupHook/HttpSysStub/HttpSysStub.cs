@@ -4,15 +4,10 @@
 using System;
 using System.Linq;
 using System.Security.Claims;
-using System.Text.Encodings.Web;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace Microsoft.AspNetCore.Server.HttpSys
 {
@@ -73,17 +68,9 @@ namespace Microsoft.AspNetCore.Hosting
                     k.Limits.MaxRequestBodySize = opts.MaxRequestBodySize;
             });
 
-            // Register a startup filter that strips URL paths and deduplicates ports.
-            // IStartupFilter.Configure runs AFTER all builder config is done but BEFORE
-            // the server starts listening — the right time to modify URLs.
             builder.ConfigureServices(services =>
             {
                 services.AddSingleton<IStartupFilter>(new UrlStrippingStartupFilter(_boundPorts));
-
-                // Register passthrough auth as fallback for hosts without auth.
-                // Don't override defaults — let BC's own auth work where configured.
-                services.AddAuthentication()
-                    .AddScheme<AuthenticationSchemeOptions, PassthroughAuthHandler>("Passthrough", o => { });
             });
 
             return builder;
@@ -95,6 +82,12 @@ namespace Microsoft.AspNetCore.Hosting
         }
     }
 
+    /// <summary>
+    /// Startup filter that:
+    /// 1. Strips URL paths from server addresses (Kestrel can't handle path-based URLs)
+    /// 2. Adds UsePathBase() so BC's middleware routes correctly
+    /// 3. Sets admin identity on every request (bypasses auth for all endpoints)
+    /// </summary>
     internal class UrlStrippingStartupFilter : IStartupFilter
     {
         private readonly System.Collections.Generic.HashSet<int> _boundPorts;
@@ -125,31 +118,21 @@ namespace Microsoft.AspNetCore.Hosting
                                 pathBase = path;
                             Console.WriteLine($"[HttpSysStub] {addr} → {stripped}");
                         }
-                        else
-                        {
-                            Console.WriteLine($"[HttpSysStub] {addr} → skipped (port in use)");
-                        }
                     }
                 }
 
-                // Add path base so BC's middleware routes correctly
                 if (!string.IsNullOrEmpty(pathBase))
-                {
-                    Console.WriteLine($"[HttpSysStub] UsePathBase({pathBase})");
                     app.UsePathBase(pathBase);
-                }
 
-                // Bypass auth: set authenticated admin user on every request.
+                // Set authenticated admin identity on every request
                 app.Use(async (context, nextMiddleware) =>
                 {
-                    var claims = new[] {
+                    var identity = new ClaimsIdentity(new[] {
                         new Claim(ClaimTypes.Name, "admin"),
                         new Claim(ClaimTypes.Role, "SUPER"),
                         new Claim(ClaimTypes.Role, "AdminService"),
                         new Claim(ClaimTypes.NameIdentifier, "00000000-0000-0000-0000-000000000001"),
-                        new Claim("http://schemas.microsoft.com/ws/2008/06/identity/claims/role", "AdminService"),
-                    };
-                    var identity = new ClaimsIdentity(claims, "Passthrough");
+                    }, "Passthrough");
                     context.User = new ClaimsPrincipal(identity);
                     await nextMiddleware();
                 });
@@ -172,10 +155,7 @@ namespace Microsoft.AspNetCore.Hosting
                 lock (_boundPorts)
                 {
                     if (!_boundPorts.Add(port))
-                    {
-                        // Port already bound — find next available
                         while (!_boundPorts.Add(++port)) { }
-                    }
                 }
                 return ($"{scheme}://{host}:{port}", string.IsNullOrEmpty(path) || path == "/" ? null : path);
             }
@@ -183,28 +163,6 @@ namespace Microsoft.AspNetCore.Hosting
             {
                 return (url, null);
             }
-        }
-    }
-
-    /// <summary>
-    /// Authentication handler that always succeeds with a SYSTEM identity.
-    /// Used when BC doesn't configure any auth scheme (e.g., management API on Linux).
-    /// </summary>
-    internal class PassthroughAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions>
-    {
-        public PassthroughAuthHandler(IOptionsMonitor<AuthenticationSchemeOptions> options,
-            ILoggerFactory logger, UrlEncoder encoder) : base(options, logger, encoder) { }
-
-        protected override Task<AuthenticateResult> HandleAuthenticateAsync()
-        {
-            var claims = new[] {
-                new Claim(ClaimTypes.Name, "admin"),
-                new Claim(ClaimTypes.Role, "SUPER"),
-                new Claim(ClaimTypes.NameIdentifier, "00000000-0000-0000-0000-000000000001"),
-            };
-            var identity = new ClaimsIdentity(claims, "Passthrough");
-            var principal = new ClaimsPrincipal(identity);
-            return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(principal, "Passthrough")));
         }
     }
 }

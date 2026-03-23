@@ -311,37 +311,6 @@ internal class StartupHook
 
             // Patch #3 (kernel32.dll) is handled globally via NativeLibrary resolver
 
-            // --- Patch #13: VerifyTestExecutionEnabled — allow test execution on onprem/production ---
-            var testRunnerType = navNcl.GetType("Microsoft.Dynamics.Nav.Runtime.NavTestExecution");
-            if (testRunnerType != null)
-            {
-                // Search all methods including inherited
-                MethodInfo? verifyMethod = null;
-                foreach (var m in testRunnerType.GetMethods(BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.DeclaredOnly | BindingFlags.FlattenHierarchy))
-                {
-                    if (m.Name == "VerifyTestExecutionEnabled")
-                    {
-                        verifyMethod = m;
-                        break;
-                    }
-                }
-                if (verifyMethod != null)
-                {
-                    var replacement = typeof(StartupHook).GetMethod(nameof(Replacement_ReturnVoid),
-                        BindingFlags.Public | BindingFlags.Static)!;
-                    ApplyJmpHook(verifyMethod, replacement, "NavTestRunnerCodeUnit.VerifyTestExecutionEnabled");
-                }
-                else
-                {
-                    var methods = testRunnerType.GetMethods(BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly);
-                    var names = new System.Collections.Generic.List<string>();
-                    foreach (var m in methods) names.Add(m.Name);
-                    Console.WriteLine($"[StartupHook] VerifyTestExecutionEnabled not found in {testRunnerType.FullName}. Methods: {string.Join(", ", names)}");
-                }
-            }
-            else
-                Console.WriteLine("[StartupHook] NavTestRunnerCodeUnit not found");
-
             // --- Patch #6: EmitServerStartupTraceEvents — contains System.Drawing font enum ---
             var emitMethod = envType.GetMethod("EmitServerStartupTraceEvents",
                 BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance);
@@ -990,9 +959,6 @@ internal class StartupHook
     [MethodImpl(MethodImplOptions.NoInlining)]
     public static object? Replacement_ReturnNull() { return null; }
 
-    /// <summary>No-op replacement for void methods with one parameter (e.g., VerifyTestExecutionEnabled).</summary>
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    public static void Replacement_ReturnVoid(object? arg) { }
 
     // --- Patch #2: NavEnvironment replacements ---
 
