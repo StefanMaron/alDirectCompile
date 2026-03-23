@@ -3,10 +3,16 @@
 // We redirect to Kestrel and use an IStartupFilter to strip URL paths at app startup.
 using System;
 using System.Linq;
+using System.Security.Claims;
+using System.Text.Encodings.Web;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Microsoft.AspNetCore.Server.HttpSys
 {
@@ -44,7 +50,7 @@ namespace Microsoft.AspNetCore.Server.HttpSys
     [Flags]
     public enum AuthenticationSchemes
     {
-        None = 0, Basic = 1, NTLM = 4, Negotiate = 8, Kerberos = 16,
+        None = 0, Basic = 1, Anonymous = 2, NTLM = 4, Negotiate = 8, Kerberos = 16,
     }
 }
 
@@ -73,6 +79,30 @@ namespace Microsoft.AspNetCore.Hosting
             builder.ConfigureServices(services =>
             {
                 services.AddSingleton<IStartupFilter>(new UrlStrippingStartupFilter(_boundPorts));
+
+                // Register passthrough auth. BC may also register BasicAuthentication/Negotiate
+                // which fail on Linux. We set Passthrough as default so it runs first.
+                services.AddAuthentication("Passthrough")
+                    .AddScheme<AuthenticationSchemeOptions, PassthroughAuthHandler>("Passthrough", o => { });
+                // Force Passthrough as default for ALL auth/authz operations
+                services.PostConfigureAll<AuthenticationOptions>(authOpts =>
+                {
+                    authOpts.DefaultScheme = "Passthrough";
+                    authOpts.DefaultChallengeScheme = "Passthrough";
+                    authOpts.DefaultAuthenticateScheme = "Passthrough";
+                    authOpts.DefaultForbidScheme = "Passthrough";
+                    authOpts.DefaultSignInScheme = "Passthrough";
+                    authOpts.DefaultSignOutScheme = "Passthrough";
+                });
+                services.PostConfigureAll<Microsoft.AspNetCore.Authorization.AuthorizationOptions>(authzOpts =>
+                {
+                    var policy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder("Passthrough")
+                        .RequireAuthenticatedUser()
+                        .Build();
+                    authzOpts.DefaultPolicy = policy;
+                    authzOpts.FallbackPolicy = null;
+                    authzOpts.AddPolicy("AdminService", policy);
+                });
             });
 
             return builder;
@@ -158,6 +188,28 @@ namespace Microsoft.AspNetCore.Hosting
             {
                 return (url, null);
             }
+        }
+    }
+
+    /// <summary>
+    /// Authentication handler that always succeeds with a SYSTEM identity.
+    /// Used when BC doesn't configure any auth scheme (e.g., management API on Linux).
+    /// </summary>
+    internal class PassthroughAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions>
+    {
+        public PassthroughAuthHandler(IOptionsMonitor<AuthenticationSchemeOptions> options,
+            ILoggerFactory logger, UrlEncoder encoder) : base(options, logger, encoder) { }
+
+        protected override Task<AuthenticateResult> HandleAuthenticateAsync()
+        {
+            var claims = new[] {
+                new Claim(ClaimTypes.Name, "admin"),
+                new Claim(ClaimTypes.Role, "SUPER"),
+                new Claim(ClaimTypes.NameIdentifier, "00000000-0000-0000-0000-000000000001"),
+            };
+            var identity = new ClaimsIdentity(claims, "Passthrough");
+            var principal = new ClaimsPrincipal(identity);
+            return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(principal, "Passthrough")));
         }
     }
 }

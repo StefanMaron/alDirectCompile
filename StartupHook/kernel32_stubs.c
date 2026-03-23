@@ -92,6 +92,13 @@ int LocaleNameToLCID(const void* localeName, int flags) {
     return 0; // LOCALE_INVARIANT
 }
 
+// --- Authentication ---
+int LogonUserW(const void* username, const void* domain, const void* password,
+               uint32_t logonType, uint32_t logonProvider, HANDLE* phToken) {
+    *phToken = (HANDLE)0xAA00; // fake token
+    return 1; // success
+}
+
 // --- General ---
 uint32_t GetLastError(void) { return 0; }
 HANDLE GetCurrentProcess(void) { return (HANDLE)-1; }
