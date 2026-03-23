@@ -3,6 +3,9 @@
 # Downloads artifacts, restores DB, configures BC, publishes test runner, starts server.
 set -e
 
+# Unbuffered output for Docker log visibility
+exec 1> >(stdbuf -oL cat) 2>&1
+
 BC_TYPE="${BC_TYPE:-sandbox}"
 BC_VERSION="${BC_VERSION:-27.5.46862.48004}"
 BC_COUNTRY="${BC_COUNTRY:-w1}"
