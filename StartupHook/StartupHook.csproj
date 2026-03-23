@@ -21,6 +21,8 @@
     <None Remove="PerfCounterStub/**" />
     <Compile Remove="WindowsPrincipalStub/**" />
     <None Remove="WindowsPrincipalStub/**" />
+    <Compile Remove="HttpSysStub/**" />
+    <None Remove="HttpSysStub/**" />
   </ItemGroup>
 
   <!-- Compile Win32 stubs to .so for P/Invoke interception on Linux -->
@@ -42,6 +44,9 @@
           DestinationFolder="$(PublishDir)" />
     <Exec Command="dotnet build WindowsPrincipalStub/WindowsPrincipalStub.csproj -c Release -v q" />
     <Copy SourceFiles="WindowsPrincipalStub/bin/Release/net8.0/System.Security.Principal.Windows.dll"
+          DestinationFolder="$(PublishDir)" />
+    <Exec Command="dotnet build HttpSysStub/HttpSysStub.csproj -c Release -v q" />
+    <Copy SourceFiles="HttpSysStub/bin/Release/net8.0/Microsoft.AspNetCore.Server.HttpSys.dll"
           DestinationFolder="$(PublishDir)" />
     <Message Text="Copied stub DLLs" Importance="high" />
   </Target>

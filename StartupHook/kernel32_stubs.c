@@ -52,6 +52,12 @@ int GlobalMemoryStatusEx(MEMORYSTATUSEX* ms) {
 // --- Module/library ---
 int FreeLibrary(HANDLE h) { return 1; }
 HANDLE GetModuleHandle(const void* name) { return 0; }
+HANDLE GetModuleHandleW(const void* name) { return 0; }
+HANDLE LoadLibraryExW(const void* lpFileName, HANDLE hFile, uint32_t dwFlags) {
+    return (HANDLE)0x1234; // fake library handle
+}
+HANDLE LoadLibraryW(const void* lpFileName) { return (HANDLE)0x1234; }
+void* GetProcAddress(HANDLE hModule, const char* lpProcName) { return 0; } // function not found
 
 // --- Performance counter ---
 int QueryPerformanceCounter(int64_t* ticks) {

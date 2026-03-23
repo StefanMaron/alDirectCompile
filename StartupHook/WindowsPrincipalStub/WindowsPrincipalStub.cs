@@ -34,6 +34,16 @@ namespace System.Security.Principal
 
         public WindowsImpersonationContext Impersonate() => new WindowsImpersonationContext();
         public static WindowsImpersonationContext Impersonate(IntPtr userToken) => new WindowsImpersonationContext();
+
+        public static void RunImpersonated(Microsoft.Win32.SafeHandles.SafeAccessTokenHandle safeAccessTokenHandle, Action action)
+        {
+            action(); // Just run the action without impersonation
+        }
+
+        public static T RunImpersonated<T>(Microsoft.Win32.SafeHandles.SafeAccessTokenHandle safeAccessTokenHandle, Func<T> func)
+        {
+            return func();
+        }
     }
 
     public class WindowsImpersonationContext : IDisposable

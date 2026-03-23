@@ -7,7 +7,8 @@ RUN mkdir -p "/usr/share/Microsoft/Microsoft Dynamics NAV/270/Server"
 COPY ["StartupHook/bin/Release/net8.0/publish/", "/bc/hook/"]
 
 # Override framework DLLs that throw PlatformNotSupportedException on Linux
-RUN cp /bc/hook/System.Security.Principal.Windows.dll /usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.*/
+RUN cp /bc/hook/System.Security.Principal.Windows.dll /usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.*/ && \
+    cp /bc/hook/Microsoft.AspNetCore.Server.HttpSys.dll /usr/share/dotnet/shared/Microsoft.AspNetCore.App/8.0.*/
 
 # Copy BC service tier (use JSON array form to handle spaces)
 COPY ["artifacts/onprem/27.5.46862.0/platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/270/Service/", "/bc/service/"]
