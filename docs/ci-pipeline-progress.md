@@ -59,22 +59,50 @@ BCApps tag `releases/27.5/StrictMode` matches our v27.5 platform artifacts exact
 
 ### What Is NOT Yet Working
 
-**1. BCApps Test Execution on CI**
+**1. BCApps Test Extension Publishing (the ONE remaining blocker)**
 
-The System Application Test Library and Test extensions fail to PUBLISH to BC via the
-dev endpoint (HTTP 422). The dev endpoint triggers server-side recompilation, and BC's
-server-side compiler can't resolve standard .NET types (`GenericList1`, `XmlDocument`)
-because:
+The System Application Test Library fails to PUBLISH via the dev endpoint (HTTP 422).
+Root cause chain fully identified:
 
-- These are defined in .NET runtime DLLs (System.Collections.dll, System.Private.Xml.dll)
-- BC's server-side compiler looks in `/bc/service/Add-Ins/` for probing
-- The .NET runtime DLLs use type-forwarding (facade → implementation assembly)
-- BC's server-side compiler doesn't follow these forwarding chains from Add-Ins
+1. Dev endpoint ALWAYS triggers server-side AL recompilation (even for pre-compiled .app)
+2. Server-side compiler loads `assembly("netstandard")` from .NET runtime path (ignores Add-Ins)
+3. .NET 8's `netstandard.dll` is a facade with type-forwarding (Dictionary → System.Runtime → CoreLib)
+4. BC's Cecil-based type resolver does NOT follow type-forwarding chains
+5. Types `GenericList1`, `XmlDocument`, `GenericDictionary2` declared in System Application → assembly("netstandard") → resolution fails
 
-The management API (which could install pre-compiled apps without recompilation)
-returns 404 due to Windows auth requirements.
+**What was tried and learned:**
 
-**2. ~6 min Startup Delay (Win32Exception)**
+| Approach | Result |
+|----------|--------|
+| Stub netstandard.dll in Add-Ins (no forwarding) | BC ignores Add-Ins for netstandard — loads from .NET runtime path |
+| Patched netstandard.dll via Cecil (real identity + stub types) | Same: runtime path takes precedence |
+| Replace netstandard in runtime path | .NET runtime crashes (stubs have no method implementations) |
+| BCNetStubs.dll (custom assembly) in Add-Ins | Works for type finding but needs method signatures for validation |
+| Add DotNet declarations to Test Library directly | Dependency declarations (System App) take precedence |
+| Strip AL source from .app (runtime package) | Invalid package format |
+
+**Path forward (not yet implemented):**
+
+- **Option A**: Build complete BCNetStubs by merging .NET reference assemblies (have full method signatures). Requires Cecil-based tool to copy type metadata from ~40 reference assembly DLLs. Then modify System Application's dotnet.al to use BCNetStubs instead of netstandard.
+- **Option B**: Call management API (`NavAppPublisher.Publish`) directly via WCF/WebSocket from within BC process. The management path (Publish-NAVApp cmdlet) doesn't recompile — it accepts pre-compiled packages.
+- **Option C**: Patch BC's Cecil type resolver to follow type-forwarding (hook in StartupHook).
+
+Microsoft's own BCApps pipeline uses the management cmdlet path (Publish-NAVApp), not the dev endpoint. They also uninstall all pre-installed apps first, then publish from scratch.
+
+**Key files:**
+- MockTest.dll: available at `artifacts/onprem/.../platform/Test Assemblies/Mock Assemblies/`
+- BCNetStubs approach: requires `assembly("netstandard")` → `assembly("BCNetStubs")` change in System Application's dotnet.al
+
+**2. Watson Crash Prevention (FIXED)**
+
+Watson reporting (WatsonReporting.GetRegistryValue) caused NullRef crashes on the GC
+finalizer thread. Fixed by:
+- TaskScheduler.UnobservedTaskException handler with SetObserved()
+- Timer-based cleanup that strips BC's NavEnvironment Watson handler via reflection
+- Disabling tiered compilation (DOTNET_TieredCompilation=0) to keep JMP hooks stable
+- JMP hooks on SendReport, GetWatsonPath, GetRegistryValue as defense-in-depth
+
+**3. ~6 min Startup Delay (Win32Exception)**
 
 Every cold start has ~10 retries of a Win32Exception (0x80004005) with 30s backoff.
 This is NOT the SPN registration (we patched `AllowToRegisterServicePrincipalName`
