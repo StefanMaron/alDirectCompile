@@ -205,8 +205,14 @@ BC_PID=$!
     INSTANCE=$(grep -oP 'ServerInstance" value="\K[^"]+' $SERVICE_DIR/CustomSettings.config 2>/dev/null || echo "InstanceName")
     DEV_URL="http://localhost:7049/$INSTANCE/dev"
 
-    echo "[entrypoint] Waiting for dev endpoint ($DEV_URL)..."
-    for i in $(seq 1 120); do
+    echo "[entrypoint] Waiting for BC to start..."
+    for i in $(seq 1 180); do
+        # Check if BC process died
+        if ! kill -0 $BC_PID 2>/dev/null; then
+            echo "[entrypoint] ERROR: BC process died"
+            wait $BC_PID 2>/dev/null
+            exit 1
+        fi
         HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$DEV_URL/packages" 2>&1)
         if [ "$HTTP" != "000" ]; then
             break
