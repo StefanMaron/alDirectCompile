@@ -62,6 +62,15 @@ if [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ]; then
     cp /bc/hook/System.Security.Principal.Windows.dll /usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.*/
     cp /bc/hook/Microsoft.AspNetCore.Server.HttpSys.dll /usr/share/dotnet/shared/Microsoft.AspNetCore.App/8.0.*/
 
+    # Replace stub DLLs in service dir (Geneva, SqlClient, etc.)
+    for stub in OpenTelemetry.Exporter.Geneva.dll Microsoft.Data.SqlClient.dll; do
+        if [ -f "/bc/hook/$stub" ]; then
+            [ -f "$SERVICE_DIR/$stub" ] && [ ! -f "$SERVICE_DIR/${stub}.orig" ] && cp "$SERVICE_DIR/$stub" "$SERVICE_DIR/${stub}.orig"
+            cp "/bc/hook/$stub" "$SERVICE_DIR/$stub"
+            echo "[entrypoint] Replaced $stub with stub/unix version"
+        fi
+    done
+
     # Patch CustomSettings.config
     CONFIG="$SERVICE_DIR/CustomSettings.config"
     sed -i \
