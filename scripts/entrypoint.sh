@@ -195,6 +195,20 @@ echo "[entrypoint] Database ready (admin / Admin123!)."
 # Step 4: Start BC server in background, publish test runner, then wait
 # =============================================================================
 cd "$SERVICE_DIR"
+
+# Verify SQL is still accessible before starting BC
+echo "[entrypoint] Verifying SQL connection..."
+if sqlcmd -S "$SQL_SERVER" -U "$BC_DB_USER" -P "$BC_DB_PASSWORD" -d CRONUS -C -No -Q "SELECT 1" &>/dev/null; then
+    echo "[entrypoint] SQL connection verified."
+else
+    echo "[entrypoint] ERROR: SQL connection failed! Retrying..."
+    sleep 5
+    sqlcmd -S "$SQL_SERVER" -U "$BC_DB_USER" -P "$BC_DB_PASSWORD" -d CRONUS -C -No -Q "SELECT 1" || {
+        echo "[entrypoint] FATAL: Cannot connect to SQL"
+        exit 1
+    }
+fi
+
 echo "[entrypoint] Starting BC service tier..."
 # Start BC — use a FIFO to keep stdin open for /console mode
 mkfifo /tmp/bc-stdin 2>/dev/null || true
