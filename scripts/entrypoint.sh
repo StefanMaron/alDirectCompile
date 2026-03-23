@@ -1,13 +1,8 @@
 #!/bin/bash
 # Self-contained BC service tier entrypoint.
 # Downloads artifacts, restores DB, configures BC, publishes test runner, starts server.
-set -eo pipefail
-trap 'echo "[entrypoint] ERROR at line $LINENO: $BASH_COMMAND (exit $?)"' ERR
-
-# Unbuffered output for Docker log visibility
-if command -v stdbuf &>/dev/null; then
-    exec 1> >(stdbuf -oL cat) 2>&1
-fi
+set -e
+trap 'echo "[entrypoint] FAILED at line $LINENO: $BASH_COMMAND (exit $?)" >&2' ERR
 
 BC_TYPE="${BC_TYPE:-sandbox}"
 BC_VERSION="${BC_VERSION:-27.5.46862.48004}"
