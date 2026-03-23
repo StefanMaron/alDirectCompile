@@ -8,7 +8,7 @@ services:
     ports:
       - "11433:1433"
     volumes:
-      - ./artifacts/onprem/27.5.46862.0/w1/database:/backup:ro
+      - ./artifacts/sandbox/27.5.46862.48004/w1:/backup:ro
     tmpfs:
       - /var/opt/mssql/data:size=2g
     healthcheck:

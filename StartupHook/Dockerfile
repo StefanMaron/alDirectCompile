@@ -11,7 +11,7 @@ RUN cp /bc/hook/System.Security.Principal.Windows.dll /usr/share/dotnet/shared/M
     cp /bc/hook/Microsoft.AspNetCore.Server.HttpSys.dll /usr/share/dotnet/shared/Microsoft.AspNetCore.App/8.0.*/
 
 # Copy BC service tier
-COPY ["artifacts/onprem/27.5.46862.0/platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/270/Service/", "/bc/service/"]
+COPY ["artifacts/sandbox/27.5.46862.48004/platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/270/Service/", "/bc/service/"]
 
 ENV DOTNET_STARTUP_HOOKS=/bc/hook/StartupHook.dll
 WORKDIR /bc/service
