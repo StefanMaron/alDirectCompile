@@ -99,6 +99,13 @@ int LogonUserW(const void* username, const void* domain, const void* password,
     return 1; // success
 }
 
+// --- Tick count ---
+uint64_t GetTickCount64(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
 // --- General ---
 uint32_t GetLastError(void) { return 0; }
 HANDLE GetCurrentProcess(void) { return (HANDLE)-1; }

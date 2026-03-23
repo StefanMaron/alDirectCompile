@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Microsoft.Dynamics.Nav.Ncl">
+      <HintPath>../../artifacts/onprem/27.5.46862.0/platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/270/Service/Microsoft.Dynamics.Nav.Ncl.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Dynamics.Nav.Types">
+      <HintPath>../../artifacts/onprem/27.5.46862.0/platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/270/Service/Microsoft.Dynamics.Nav.Types.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Dynamics.Nav.Core">
+      <HintPath>../../artifacts/onprem/27.5.46862.0/platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/270/Service/Microsoft.Dynamics.Nav.Core.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

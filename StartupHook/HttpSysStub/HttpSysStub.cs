@@ -80,29 +80,10 @@ namespace Microsoft.AspNetCore.Hosting
             {
                 services.AddSingleton<IStartupFilter>(new UrlStrippingStartupFilter(_boundPorts));
 
-                // Register passthrough auth. BC may also register BasicAuthentication/Negotiate
-                // which fail on Linux. We set Passthrough as default so it runs first.
-                services.AddAuthentication("Passthrough")
+                // Register passthrough auth as fallback for hosts without auth.
+                // Don't override defaults — let BC's own auth work where configured.
+                services.AddAuthentication()
                     .AddScheme<AuthenticationSchemeOptions, PassthroughAuthHandler>("Passthrough", o => { });
-                // Force Passthrough as default for ALL auth/authz operations
-                services.PostConfigureAll<AuthenticationOptions>(authOpts =>
-                {
-                    authOpts.DefaultScheme = "Passthrough";
-                    authOpts.DefaultChallengeScheme = "Passthrough";
-                    authOpts.DefaultAuthenticateScheme = "Passthrough";
-                    authOpts.DefaultForbidScheme = "Passthrough";
-                    authOpts.DefaultSignInScheme = "Passthrough";
-                    authOpts.DefaultSignOutScheme = "Passthrough";
-                });
-                services.PostConfigureAll<Microsoft.AspNetCore.Authorization.AuthorizationOptions>(authzOpts =>
-                {
-                    var policy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder("Passthrough")
-                        .RequireAuthenticatedUser()
-                        .Build();
-                    authzOpts.DefaultPolicy = policy;
-                    authzOpts.FallbackPolicy = null;
-                    authzOpts.AddPolicy("AdminService", policy);
-                });
             });
 
             return builder;
@@ -152,12 +133,26 @@ namespace Microsoft.AspNetCore.Hosting
                 }
 
                 // Add path base so BC's middleware routes correctly
-                // e.g., requests to /BC/dev/packages get PathBase=/BC/dev, Path=/packages
                 if (!string.IsNullOrEmpty(pathBase))
                 {
                     Console.WriteLine($"[HttpSysStub] UsePathBase({pathBase})");
                     app.UsePathBase(pathBase);
                 }
+
+                // Bypass auth: set authenticated admin user on every request.
+                app.Use(async (context, nextMiddleware) =>
+                {
+                    var claims = new[] {
+                        new Claim(ClaimTypes.Name, "admin"),
+                        new Claim(ClaimTypes.Role, "SUPER"),
+                        new Claim(ClaimTypes.Role, "AdminService"),
+                        new Claim(ClaimTypes.NameIdentifier, "00000000-0000-0000-0000-000000000001"),
+                        new Claim("http://schemas.microsoft.com/ws/2008/06/identity/claims/role", "AdminService"),
+                    };
+                    var identity = new ClaimsIdentity(claims, "Passthrough");
+                    context.User = new ClaimsPrincipal(identity);
+                    await nextMiddleware();
+                });
 
                 next(app);
             };
