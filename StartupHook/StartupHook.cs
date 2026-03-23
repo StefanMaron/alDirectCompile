@@ -52,6 +52,7 @@ internal class StartupHook
         // Patch #6: Must be set before ANY System.Drawing type is accessed
         AppContext.SetSwitch("System.Drawing.EnableUnixSupport", true);
 
+
         Console.WriteLine("[StartupHook] Initializing Linux compatibility patches...");
 
         // Patch #3: Load kernel32 stubs for P/Invoke interception
@@ -993,7 +994,8 @@ internal class StartupHook
     [MethodImpl(MethodImplOptions.NoInlining)]
     public static object? Replacement_GetServiceAccount()
     {
-        return null;
+        // Return a SecurityIdentifier for LocalSystem (S-1-5-18)
+        return new System.Security.Principal.SecurityIdentifier("S-1-5-18");
     }
 
     /// <summary>
