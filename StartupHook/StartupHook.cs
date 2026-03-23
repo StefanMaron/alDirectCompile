@@ -504,6 +504,8 @@ internal class StartupHook
         {
             if (targetMethod?.Name == "get_IsServiceRunningInLocalEnvironment")
                 return false; // Must be false to skip ACL APIs on Linux
+            if (targetMethod?.Name == "get_AllowToRegisterServicePrincipalName")
+                return false; // Skip SPN registration (requires Active Directory)
             // Delegate to original topology
             if (_originalTopology != null && targetMethod != null)
             {
