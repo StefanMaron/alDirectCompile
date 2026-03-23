@@ -30,6 +30,7 @@ else
 fi
 
 # Read manifest
+echo "[entrypoint] Disk: $(df -h /bc/artifacts | tail -1 | awk '{print $4 " free"}')"
 echo "[entrypoint] Reading manifest..."
 MANIFEST="$ARTIFACTS/app/manifest.json"
 ls -la "$MANIFEST" || { echo "[entrypoint] FATAL: manifest.json not found at $MANIFEST"; exit 1; }

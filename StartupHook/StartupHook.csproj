@@ -16,12 +16,10 @@
     <PackageReference Include="Microsoft.Data.SqlClient" Version="6.0.5" />
   </ItemGroup>
 
-  <!-- Copy unix SqlClient to publish output -->
+  <!-- Force unix SqlClient into publish output (overwrite Windows version) -->
   <Target Name="CopySqlClient" AfterTargets="Publish">
-    <ItemGroup>
-      <SqlClientUnix Include="$(NuGetPackageRoot)microsoft.data.sqlclient/6.0.5/runtimes/unix/lib/net8.0/Microsoft.Data.SqlClient.dll" />
-    </ItemGroup>
-    <Copy SourceFiles="@(SqlClientUnix)" DestinationFolder="$(PublishDir)" Condition="Exists('@(SqlClientUnix)')" />
+    <Exec Command="cp $(NuGetPackageRoot)microsoft.data.sqlclient/6.0.5/runtimes/unix/lib/net8.0/Microsoft.Data.SqlClient.dll $(PublishDir)Microsoft.Data.SqlClient.dll"
+          Condition="'$(OS)' != 'Windows_NT'" />
     <Message Text="Copied unix SqlClient to publish" Importance="high" />
   </Target>
 
