@@ -43,8 +43,12 @@ echo "[artifacts] Platform version: $PLATFORM_VERSION"
 mkdir -p "$DEST/platform"
 echo "[artifacts] Downloading platform artifact..."
 curl -sSL "$PLATFORM_URL" -o "$DEST/bc-platform.zip"
-echo "[artifacts] Extracting platform ($(du -h "$DEST/bc-platform.zip" | cut -f1))..."
+ZIPSIZE=$(du -h "$DEST/bc-platform.zip" | cut -f1)
+echo "[artifacts] Extracting platform ($ZIPSIZE) — ServiceTier + ModernDev only..."
+# Extract only what we need (ServiceTier + ModernDev) to save disk space
+unzip -qo "$DEST/bc-platform.zip" 'ServiceTier/*' 'ModernDev/*' -d "$DEST/platform" 2>/dev/null || \
 unzip -qo "$DEST/bc-platform.zip" -d "$DEST/platform"
 rm -f "$DEST/bc-platform.zip"
+echo "[artifacts] Disk usage: $(du -sh "$DEST" | cut -f1)"
 
 echo "[artifacts] Done. Artifacts at $DEST"
