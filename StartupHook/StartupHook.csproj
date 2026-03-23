@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <NoWarn>CA1416</NoWarn>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- Exclude stub subprojects from this compilation -->
+  <ItemGroup>
+    <Compile Remove="GenevaStub/**" />
+    <None Remove="GenevaStub/**" />
+    <Compile Remove="DrawingStub/**" />
+    <None Remove="DrawingStub/**" />
+    <Compile Remove="PerfCounterStub/**" />
+    <None Remove="PerfCounterStub/**" />
+  </ItemGroup>
+
+  <!-- Compile Win32 stubs to .so for P/Invoke interception on Linux -->
+  <Target Name="CompileWin32Stubs" BeforeTargets="Publish" Condition="'$(OS)' != 'Windows_NT'">
+    <Exec Command="cc -shared -fPIC -o $(PublishDir)libwin32_stubs.so kernel32_stubs.c" />
+    <Message Text="Compiled libwin32_stubs.so" Importance="high" />
+  </Target>
+
+  <!-- Build and copy stub DLLs -->
+  <Target Name="BuildStubs" BeforeTargets="Publish">
+    <Exec Command="dotnet build GenevaStub/GenevaStub.csproj -c Release -v q" />
+    <Copy SourceFiles="GenevaStub/bin/Release/net8.0/OpenTelemetry.Exporter.Geneva.dll"
+          DestinationFolder="$(PublishDir)" />
+    <Exec Command="dotnet build DrawingStub/DrawingStub.csproj -c Release -v q" />
+    <Copy SourceFiles="DrawingStub/bin/Release/net8.0/System.Drawing.Common.dll"
+          DestinationFolder="$(PublishDir)" />
+    <Exec Command="dotnet build PerfCounterStub/PerfCounterStub.csproj -c Release -v q" />
+    <Copy SourceFiles="PerfCounterStub/bin/Release/net8.0/System.Diagnostics.PerformanceCounter.dll"
+          DestinationFolder="$(PublishDir)" />
+    <Message Text="Copied stub DLLs" Importance="high" />
+  </Target>
+
+</Project>
