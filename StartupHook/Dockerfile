@@ -13,11 +13,15 @@ RUN cp /bc/hook/System.Security.Principal.Windows.dll /usr/share/dotnet/shared/M
 # Copy BC service tier (use JSON array form to handle spaces)
 COPY ["artifacts/onprem/27.5.46862.0/platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/270/Service/", "/bc/service/"]
 
+# Make side service executables non-executable (BC needs to find them but they can't run on Linux)
+# The Win32Exception from trying to execute .exe files on Linux is non-fatal.
+# Do NOT delete them — BC throws a fatal SideServiceProcessException if missing.
+
 # Set up environment
 ENV DOTNET_STARTUP_HOOKS=/bc/hook/StartupHook.dll
 WORKDIR /bc/service
 
-# Expose BC ports
-EXPOSE 17045 17047 17048 17049 17085 17086
+# Expose standard BC ports (HttpSysStub extracts port from BC URL config)
+EXPOSE 7045 7047 7048 7049 7083 7085 7086
 
 ENTRYPOINT ["dotnet", "Microsoft.Dynamics.Nav.Server.dll", "/console"]

@@ -22,7 +22,7 @@ namespace System.Security.Principal
         public override string? Name => "SYSTEM";
         public override string AuthenticationType => "Negotiate";
         public override bool IsAuthenticated => true;
-        public SecurityIdentifier? User => null;
+        public SecurityIdentifier? User => new SecurityIdentifier("S-1-5-18");
         public SecurityIdentifier? Owner => null;
         public IntPtr Token => IntPtr.Zero;
         public TokenImpersonationLevel ImpersonationLevel => TokenImpersonationLevel.None;
@@ -79,7 +79,7 @@ namespace System.Security.Principal
         public override int GetHashCode() => _value.GetHashCode();
         public override string ToString() => _value;
         public bool IsAccountSid() => true;
-        public bool IsWellKnown(WellKnownSidType type) => false;
+        public bool IsWellKnown(WellKnownSidType type) => _value == "S-1-5-18" && type == WellKnownSidType.LocalSystemSid;
         public override bool IsValidTargetType(Type targetType) => true;
         public override IdentityReference Translate(Type targetType) => this;
         public void GetBinaryForm(byte[] binaryForm, int offset) { }
@@ -106,12 +106,13 @@ namespace System.Security.Principal
     }
 
     public enum TokenAccessLevels { AssignPrimary = 1, Duplicate = 2, Impersonate = 4, Query = 8, MaximumAllowed = 0x2000000 }
-    public enum TokenImpersonationLevel { None = 0, Anonymous = 1, Identification = 2, Impersonation = 3, Delegation = 4 }
+    // TokenImpersonationLevel is NOT redefined here — it exists in System.Runtime (BCL).
+    // Redefining it causes "Method not found" because the caller expects the BCL version.
     public enum WindowsBuiltInRole { Administrator = 544, User = 545, Guest = 546 }
-    public class IdentityReferenceCollection : System.Collections.Generic.List<IdentityReference>
+    public class IdentityReferenceCollection : System.Collections.ObjectModel.Collection<IdentityReference>
     {
         public IdentityReferenceCollection() { }
-        public IdentityReferenceCollection(int capacity) : base(capacity) { }
+        public IdentityReferenceCollection(int capacity) { }
         public IdentityReferenceCollection Translate(Type targetType) => this;
     }
 

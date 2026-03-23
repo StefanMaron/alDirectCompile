@@ -708,7 +708,11 @@ internal class StartupHook
 
         string dllName = assemblyName + ".dll";
         string targetDll = Path.Combine(baseDir, dllName);
-        if (!File.Exists(targetDll)) return;
+        string backup = targetDll + ".orig";
+
+        // If original already removed (container restart), just load stub bytes
+        bool originalExists = File.Exists(targetDll);
+        bool alreadyMoved = !originalExists && File.Exists(backup);
 
         var hookDir = Path.GetDirectoryName(typeof(StartupHook).Assembly.Location);
         if (hookDir == null) return;
@@ -721,8 +725,15 @@ internal class StartupHook
 
         _stubBytesMap[assemblyName] = File.ReadAllBytes(stubDll);
 
+        if (alreadyMoved)
+        {
+            Console.WriteLine($"[StartupHook] {assemblyName} stub ready (already moved, via resolver)");
+            return;
+        }
+
+        if (!originalExists) return;
+
         // Move original aside so default resolution fails → our resolver provides the stub
-        string backup = targetDll + ".orig";
         try
         {
             if (!File.Exists(backup))
@@ -967,8 +978,10 @@ internal class StartupHook
             SetStaticField(type, "instanceId", Guid.NewGuid());
             SetStaticField(type, "serviceInstanceName", string.Empty);
 
-            // serviceAccount stays null — WindowsIdentity.GetCurrent() would crash.
-            // Properties ServiceAccount and ServiceAccountName are hooked to return stubs.
+            // serviceAccount: set to a WindowsIdentity from our stub so the original
+            // getters (ServiceAccount => serviceAccount.User, ServiceAccountName => serviceAccount.Name)
+            // work even when JMP hooks are bypassed by R2R/tiered compilation.
+            SetStaticField(type, "serviceAccount", System.Security.Principal.WindowsIdentity.GetCurrent());
 
             // Try to construct BC-typed fields (non-critical if they fail)
             TryInitField(type, "compactLohGate");
