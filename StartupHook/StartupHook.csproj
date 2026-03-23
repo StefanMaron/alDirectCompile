@@ -11,6 +11,20 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <!-- Cross-platform SqlClient for Linux (BC bundles Windows-only version) -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.0.5" />
+  </ItemGroup>
+
+  <!-- Copy unix SqlClient to publish output -->
+  <Target Name="CopySqlClient" AfterTargets="Publish">
+    <ItemGroup>
+      <SqlClientUnix Include="$(NuGetPackageRoot)microsoft.data.sqlclient/6.0.5/runtimes/unix/lib/net8.0/Microsoft.Data.SqlClient.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(SqlClientUnix)" DestinationFolder="$(PublishDir)" Condition="Exists('@(SqlClientUnix)')" />
+    <Message Text="Copied unix SqlClient to publish" Importance="high" />
+  </Target>
+
   <!-- Exclude stub subprojects from this compilation -->
   <ItemGroup>
     <Compile Remove="GenevaStub/**" />
