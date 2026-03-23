@@ -140,6 +140,111 @@ if (alSources.Count == 0)
 }
 
 // ---------------------------------------------------------------------------
+// Auto-discover dependency .app files from --packages directories.
+// Reads the NavxManifest.xml of each input .app to find dependencies,
+// then recursively finds matching .app files in the package directories
+// and adds them as additional input groups for transpilation.
+// ---------------------------------------------------------------------------
+if (packagePaths.Count > 0 && inputGroups.Any(g => g.Path.EndsWith(".app", StringComparison.OrdinalIgnoreCase)))
+{
+    // Build index: app GUID -> .app file path from all package directories
+    var appIndex = new Dictionary<Guid, string>();
+    foreach (var pkgDir in packagePaths)
+    {
+        foreach (var appFile in Directory.GetFiles(pkgDir, "*.app", SearchOption.AllDirectories))
+        {
+            try
+            {
+                var doc = AlTranspiler.LoadNavxManifest(appFile);
+                if (doc == null) continue;
+                XNamespace ns = "http://schemas.microsoft.com/navx/2015/manifest";
+                var appElement = doc.Root?.Element(ns + "App");
+                var idStr = appElement?.Attribute("Id")?.Value;
+                if (idStr != null && Guid.TryParse(idStr, out var appGuid))
+                {
+                    // Prefer non-test apps (Source over Test) by not overwriting
+                    if (!appIndex.ContainsKey(appGuid))
+                        appIndex[appGuid] = appFile;
+                }
+            }
+            catch { /* skip unreadable .app files */ }
+        }
+    }
+
+    // Collect GUIDs of apps already provided as inputs
+    var inputAppGuids = new HashSet<Guid>();
+    foreach (var group in inputGroups)
+    {
+        if (!group.Path.EndsWith(".app", StringComparison.OrdinalIgnoreCase)) continue;
+        try
+        {
+            var doc = AlTranspiler.LoadNavxManifest(group.Path);
+            if (doc == null) continue;
+            XNamespace ns = "http://schemas.microsoft.com/navx/2015/manifest";
+            var idStr = doc.Root?.Element(ns + "App")?.Attribute("Id")?.Value;
+            if (idStr != null && Guid.TryParse(idStr, out var appGuid))
+                inputAppGuids.Add(appGuid);
+        }
+        catch { }
+    }
+
+    // Resolve dependencies transitively
+    var toProcess = new Queue<Guid>();
+    var discovered = new HashSet<Guid>(inputAppGuids);
+
+    // Seed: deps of all input apps
+    foreach (var group in inputGroups)
+    {
+        if (!group.Path.EndsWith(".app", StringComparison.OrdinalIgnoreCase)) continue;
+        foreach (var depGuid in AlTranspiler.GetDependencyGuids(group.Path))
+        {
+            if (discovered.Add(depGuid))
+                toProcess.Enqueue(depGuid);
+        }
+    }
+
+    // BFS to find transitive deps
+    var autoDiscovered = new List<(Guid Id, string Path)>();
+    while (toProcess.Count > 0)
+    {
+        var depGuid = toProcess.Dequeue();
+        if (!appIndex.TryGetValue(depGuid, out var depAppPath)) continue;
+        autoDiscovered.Add((depGuid, depAppPath));
+
+        // Also resolve this dep's dependencies
+        foreach (var transDepGuid in AlTranspiler.GetDependencyGuids(depAppPath))
+        {
+            if (discovered.Add(transDepGuid))
+                toProcess.Enqueue(transDepGuid);
+        }
+    }
+
+    // Add discovered deps as input groups
+    if (autoDiscovered.Count > 0)
+    {
+        Console.Error.WriteLine($"\nAuto-discovered {autoDiscovered.Count} dependency app(s) for transpilation:");
+        foreach (var (id, depPath) in autoDiscovered)
+        {
+            var fileName = Path.GetFileName(depPath);
+            Console.Error.WriteLine($"  {fileName}");
+
+            var extracted = AppPackageReader.ExtractAlSources(depPath);
+            if (extracted.Count == 0) continue;
+
+            var groupSources = new List<string>();
+            foreach (var (name, source) in extracted)
+            {
+                alSources.Add(source);
+                groupSources.Add(source);
+            }
+            var fullPath = Path.GetFullPath(depPath);
+            inputPaths.Add(fullPath);
+            inputGroups.Add((fullPath, groupSources));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Step 0: Register kernel32 shim (needed for BC DLLs on Linux)
 // ---------------------------------------------------------------------------
 Kernel32Shim.EnsureRegistered();
@@ -734,7 +839,7 @@ public static class AlTranspiler
     /// Load NavxManifest.xml from an .app file, handling Ready2Run packages (nested .app).
     /// Returns the parsed XDocument or null if no manifest is found.
     /// </summary>
-    private static XDocument? LoadNavxManifest(string appPath)
+    public static XDocument? LoadNavxManifest(string appPath)
     {
         var fileBytes = File.ReadAllBytes(appPath);
         var (data, zipOffset) = ReadAppFile(fileBytes);
@@ -770,6 +875,30 @@ public static class AlTranspiler
 
         using var directStream = manifestEntry.Open();
         return XDocument.Load(directStream);
+    }
+
+    /// <summary>
+    /// Extract dependency app GUIDs from an .app file's NavxManifest.xml.
+    /// </summary>
+    public static List<Guid> GetDependencyGuids(string appPath)
+    {
+        var result = new List<Guid>();
+        try
+        {
+            var doc = LoadNavxManifest(appPath);
+            if (doc == null) return result;
+            XNamespace ns = "http://schemas.microsoft.com/navx/2015/manifest";
+            var depsElement = doc.Root?.Element(ns + "Dependencies");
+            if (depsElement == null) return result;
+            foreach (var dep in depsElement.Elements(ns + "Dependency"))
+            {
+                var idStr = dep.Attribute("Id")?.Value;
+                if (idStr != null && Guid.TryParse(idStr, out var depGuid))
+                    result.Add(depGuid);
+            }
+        }
+        catch { }
+        return result;
     }
 
     /// <summary>
@@ -1144,25 +1273,43 @@ public static class Executor
             return 1;
         }
 
-        // Create scope via GetUninitializedObject (bypasses constructor chain)
-        var scope = RuntimeHelpers.GetUninitializedObject(scopeType);
+        // Create the parent codeunit and scope using the constructor
+        // (the scope constructor initializes local record variables etc.)
+        var parentType = scopeType.DeclaringType!;
+        var parent = RuntimeHelpers.GetUninitializedObject(parentType);
 
-        // Initialize any local variable fields to their default values
-        // Use reflection to avoid compile-time dependency on specific BC types
-        foreach (var field in scopeType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        // Call InitializeComponent() if it exists
+        var initMethod = parentType.GetMethod("InitializeComponent",
+            BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
+        initMethod?.Invoke(parent, null);
+
+        // Try to create scope via constructor (which initializes fields like MockRecordHandle)
+        object? scope = null;
+        foreach (var ctor in scopeType.GetConstructors(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
         {
+            var ctorParams = ctor.GetParameters();
             try
             {
-                if (field.FieldType.FullName == "Microsoft.Dynamics.Nav.Types.Decimal18")
+                var ctorArgs = new object?[ctorParams.Length];
+                for (int i = 0; i < ctorParams.Length; i++)
                 {
-                    // Decimal18 has a ctor(decimal)
-                    var ctor = field.FieldType.GetConstructor(new[] { typeof(decimal) });
-                    if (ctor != null)
-                        field.SetValue(scope, ctor.Invoke(new object[] { 0m }));
+                    var pt = ctorParams[i].ParameterType;
+                    if (pt == parentType)
+                        ctorArgs[i] = parent;
+                    else if (pt.IsValueType)
+                        ctorArgs[i] = Activator.CreateInstance(pt);
+                    else
+                        ctorArgs[i] = null;
                 }
+                scope = ctor.Invoke(ctorArgs);
+                break;
             }
-            catch { /* Best effort */ }
+            catch { /* try next constructor */ }
         }
+
+        // Fallback: GetUninitializedObject if no constructor worked
+        if (scope == null)
+            scope = RuntimeHelpers.GetUninitializedObject(scopeType);
 
         var onRunMethod = scopeType.GetMethod("OnRun",
             BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);

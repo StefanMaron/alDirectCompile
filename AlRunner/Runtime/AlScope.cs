@@ -107,7 +107,7 @@ public static class AlDialog
     public static void Message(string format, params object?[] args)
     {
         var netFormat = ConvertAlFormat(format);
-        var stringArgs = args.Select(a => a?.ToString() ?? "").ToArray();
+        var stringArgs = args.Select(a => AlCompat.Format(a)).ToArray();
         if (stringArgs.Length > 0)
             Console.WriteLine(string.Format(netFormat, stringArgs));
         else
@@ -117,7 +117,7 @@ public static class AlDialog
     public static void Error(string format, params object?[] args)
     {
         var netFormat = ConvertAlFormat(format);
-        var stringArgs = args.Select(a => a?.ToString() ?? "").ToArray();
+        var stringArgs = args.Select(a => AlCompat.Format(a)).ToArray();
         if (stringArgs.Length > 0)
             throw new Exception(string.Format(netFormat, stringArgs));
         else

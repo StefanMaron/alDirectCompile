@@ -19,6 +19,8 @@
     <None Remove="DrawingStub/**" />
     <Compile Remove="PerfCounterStub/**" />
     <None Remove="PerfCounterStub/**" />
+    <Compile Remove="WindowsPrincipalStub/**" />
+    <None Remove="WindowsPrincipalStub/**" />
   </ItemGroup>
 
   <!-- Compile Win32 stubs to .so for P/Invoke interception on Linux -->
@@ -37,6 +39,9 @@
           DestinationFolder="$(PublishDir)" />
     <Exec Command="dotnet build PerfCounterStub/PerfCounterStub.csproj -c Release -v q" />
     <Copy SourceFiles="PerfCounterStub/bin/Release/net8.0/System.Diagnostics.PerformanceCounter.dll"
+          DestinationFolder="$(PublishDir)" />
+    <Exec Command="dotnet build WindowsPrincipalStub/WindowsPrincipalStub.csproj -c Release -v q" />
+    <Copy SourceFiles="WindowsPrincipalStub/bin/Release/net8.0/System.Security.Principal.Windows.dll"
           DestinationFolder="$(PublishDir)" />
     <Message Text="Copied stub DLLs" Importance="high" />
   </Target>

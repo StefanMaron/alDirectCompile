@@ -67,6 +67,7 @@ internal class StartupHook
         AssemblyLoadContext.Default.Resolving += ResolveStubAssembly;
         SetupStubWithResolver("System.Drawing.Common");
         SetupStubWithResolver("System.Diagnostics.PerformanceCounter");
+        SetupStubWithResolver("System.Security.Principal.Windows");
 
         AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoad;
         TryEagerPatch();
