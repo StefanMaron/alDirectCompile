@@ -2,7 +2,11 @@
 
 ## The Pitch
 
-Two concrete improvements over the current Windows-based BC pipeline:
+Microsoft doesn't care about runner costs or licenses — they own the infra.
+What they care about is **developer feedback speed**: how fast can a developer
+know if their commit broke something? Currently that's ~3 hours (BCApps CICD).
+
+Two concrete improvements:
 
 ### 1. Small Apps: Eliminate Pipeline Overhead
 
