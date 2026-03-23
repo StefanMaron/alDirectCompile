@@ -11,6 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy startup hook (pre-built)
 COPY ["StartupHook/bin/Release/net8.0/publish/", "/bc/hook/"]
 
+# Copy patched DLLs (Cecil-modified to fix Linux-specific bugs)
+COPY ["StartupHook/patched/", "/bc/patched/"]
+
 # Copy scripts and test runner
 COPY ["scripts/download-artifacts.sh", "scripts/entrypoint.sh", "/bc/scripts/"]
 COPY ["TestRunnerExtension/TestRunner.app", "/bc/testrunner/TestRunner.app"]

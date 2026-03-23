@@ -145,6 +145,16 @@ internal class StartupHook
             PatchWatsonReporting(args.LoadedAssembly);
         }
 
+        // Patch #14: Fix Cecil type-forwarding crash in server-side AL compiler.
+        // CecilDotNetTypeLoader.IsTypeForwardingCircular throws NullRef when
+        // following type-forwarding chains in netstandard.dll on Linux.
+        // Hook it to return false (no circular forwarding), allowing the compiler
+        // to follow the chain: netstandard → System.Runtime → System.Private.CoreLib.
+        if (name == "Microsoft.Dynamics.Nav.CodeAnalysis")
+        {
+            PatchCecilTypeForwarding(args.LoadedAssembly);
+        }
+
         // Re-apply encryption bypass after Main() overrides it.
         // Guard against recursion (DispatchProxy.Create triggers assembly loads).
         if (!_encryptionBypassed && !_encryptionApplying && name == "Microsoft.Dynamics.Nav.Core")
@@ -173,6 +183,10 @@ internal class StartupHook
 
         TryEagerLoadAndPatch(baseDir, "Microsoft.Dynamics.Nav.Language.dll",
             "Nav.Language.dll", PatchCustomTranslationResolver, () => _patchedLanguage);
+        // Patch #14: Eagerly load and patch the AL compiler's Cecil type loader.
+        // Must be patched BEFORE any server-side compilation happens.
+        TryEagerLoadAndPatch(baseDir, "Microsoft.Dynamics.Nav.CodeAnalysis.dll",
+            "Nav.CodeAnalysis.dll (Cecil type forwarding)", PatchCecilTypeForwarding, () => false);
         // DON'T eagerly load Nav.Ncl.dll and Nav.Types.dll — let the runtime load them
         // naturally. Eager LoadFrom creates a separate instance that the runtime doesn't use,
         // which is why JMP hooks on many methods fail (they patch the wrong instance).
@@ -412,6 +426,45 @@ internal class StartupHook
 
     // ========================================================================
     // Patch #13: Watson crash reporting (requires Windows registry)
+    // ========================================================================
+    // Patch #14: Cecil type-forwarding fix for server-side AL compiler
+    // CecilDotNetTypeLoader.IsTypeForwardingCircular crashes with NullRef
+    // when following type-forwarding chains (netstandard → System.Runtime etc.)
+    // ========================================================================
+    private static void PatchCecilTypeForwarding(Assembly codeAnalysisAsm)
+    {
+        try
+        {
+            var loaderType = codeAnalysisAsm.GetType(
+                "Microsoft.Dynamics.Nav.CodeAnalysis.DotNet.Cecil.CecilDotNetTypeLoader");
+            if (loaderType == null)
+            {
+                Console.WriteLine("[StartupHook] CecilDotNetTypeLoader type not found");
+                return;
+            }
+
+            var isCircular = loaderType.GetMethod("IsTypeForwardingCircular",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (isCircular != null)
+            {
+                var noop = typeof(StartupHook).GetMethod(nameof(IsTypeForwardingCircularNoop),
+                    BindingFlags.Static | BindingFlags.NonPublic);
+                ApplyJmpHook(isCircular, noop!, "CecilDotNetTypeLoader.IsTypeForwardingCircular");
+            }
+            else
+            {
+                Console.WriteLine("[StartupHook] IsTypeForwardingCircular method not found");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #14 (Cecil type forwarding) failed: {ex.Message}");
+        }
+    }
+
+    private static bool IsTypeForwardingCircularNoop() => false;
+
+    // ========================================================================
     // Hook all Watson entry points to prevent NullRef crash on Linux.
     // The crash chain: SendReport → GetWatsonPath → GetRegistryValue → NullRef
     // We hook all three levels for robustness (JIT timing, inlining).

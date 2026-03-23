@@ -120,6 +120,32 @@ else
     echo "[entrypoint] Service tier already set up."
 fi
 
+# Apply patched DLLs (Cecil-modified to fix Linux-specific bugs)
+# Patch #14: CodeAnalysis.dll — fix IsTypeForwardingCircular NullRef on Linux
+#   BC's Cecil type loader crashes following type-forwarding chains in netstandard.dll.
+#   The patched DLL returns false for circular check, allowing forwarding to work.
+if [ -f /bc/patched/Microsoft.Dynamics.Nav.CodeAnalysis.dll ]; then
+    cp /bc/patched/Microsoft.Dynamics.Nav.CodeAnalysis.dll "$SERVICE_DIR/Microsoft.Dynamics.Nav.CodeAnalysis.dll"
+    [ -d "$SERVICE_DIR/Admin" ] && cp /bc/patched/Microsoft.Dynamics.Nav.CodeAnalysis.dll "$SERVICE_DIR/Admin/Microsoft.Dynamics.Nav.CodeAnalysis.dll"
+    echo "[entrypoint] Applied patched CodeAnalysis.dll (Patch #14: type forwarding fix)"
+fi
+
+# Fix Add-Ins directory case (Linux is case-sensitive, BC expects "Add-Ins")
+if [ -d "$SERVICE_DIR/Add-ins" ] && [ ! -d "$SERVICE_DIR/Add-Ins" ]; then
+    mv "$SERVICE_DIR/Add-ins" "$SERVICE_DIR/Add-Ins"
+    echo "[entrypoint] Renamed Add-ins → Add-Ins (case-sensitivity fix)"
+fi
+ADDINS_DIR="$SERVICE_DIR/Add-Ins"
+
+# Copy .NET runtime DLLs to Add-Ins for the AL compiler's Cecil type-forwarding chain.
+# BC's server-side compiler uses Cecil to resolve DotNet types. When types in netstandard.dll
+# are forwarded to other assemblies (System.Runtime → System.Private.CoreLib), Cecil needs
+# those target assemblies in the probing paths.
+if [ ! -f "$ADDINS_DIR/System.Private.CoreLib.dll" ]; then
+    cp /usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.*/*.dll "$ADDINS_DIR/" 2>/dev/null || true
+    echo "[entrypoint] Copied .NET runtime DLLs to Add-Ins for type-forwarding resolution"
+fi
+
 # =============================================================================
 # Step 3: Wait for SQL Server and set up database
 # =============================================================================
@@ -189,6 +215,18 @@ fi
 
 # Sandbox tenant type
 $SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenanttype = 1 WHERE tenantid = 'default';" 2>/dev/null
+
+# Clear pre-installed apps (allows re-publishing via dev endpoint without dependency conflicts)
+$SQLCMD_DB -Q "
+DELETE FROM [NAV App Installed App];
+DELETE FROM [NAV App Tenant App];
+DELETE FROM [NAV App Dependencies];
+DELETE FROM [NAV App Published App];
+DELETE FROM [Published Application];
+DELETE FROM [Installed Application];
+DELETE FROM [Inplace Installed Application];
+" 2>/dev/null
+echo "[entrypoint] Cleared pre-installed apps (empty slate for test publishing)"
 
 # Admin user (password hash for Admin123! with GUID 00000000-0000-0000-0000-000000000001)
 USER_GUID='00000000-0000-0000-0000-000000000001'
