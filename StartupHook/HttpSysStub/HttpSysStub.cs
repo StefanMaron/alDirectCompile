@@ -1,11 +1,12 @@
 // Stub for Microsoft.AspNetCore.Server.HttpSys — redirects to Kestrel on Linux.
-// BC sets URLs via UseUrls() on the original builder (not our return value),
-// so we can't intercept URL configuration. Instead, we strip paths from
-// ASPNETCORE_URLS at startup and bind Kestrel to ports extracted from
-// the builder's settings at host build time.
+// BC calls: builder.UseHttpSys(configure) then builder.UseUrls("http://+:7048/BC/api")
+// We redirect to Kestrel and use an IStartupFilter to strip URL paths at app startup.
 using System;
 using System.Linq;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Microsoft.AspNetCore.Server.HttpSys
 {
@@ -51,7 +52,6 @@ namespace Microsoft.AspNetCore.Hosting
 {
     public static class WebHostBuilderHttpSysExtensions
     {
-        // Track which ports are already bound to avoid duplicates
         private static readonly System.Collections.Generic.HashSet<int> _boundPorts = new();
 
         public static IWebHostBuilder UseHttpSys(this IWebHostBuilder builder,
@@ -60,9 +60,6 @@ namespace Microsoft.AspNetCore.Hosting
             var opts = new Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions();
             configure?.Invoke(opts);
 
-            // BC calls UseUrls("http://+:PORT/BC/path") on the original builder
-            // (not on our return value). We configure Kestrel here and strip the
-            // URL via ConfigureServices which runs after all builder config is done.
             builder.UseKestrel(k =>
             {
                 k.AllowSynchronousIO = opts.AllowSynchronousIO;
@@ -70,21 +67,12 @@ namespace Microsoft.AspNetCore.Hosting
                     k.Limits.MaxRequestBodySize = opts.MaxRequestBodySize;
             });
 
-            // Register a service that strips the URL path before Kestrel starts.
-            // ConfigureServices runs after all builder configuration is complete.
-            builder.ConfigureServices((context, services) =>
+            // Register a startup filter that strips URL paths and deduplicates ports.
+            // IStartupFilter.Configure runs AFTER all builder config is done but BEFORE
+            // the server starts listening — the right time to modify URLs.
+            builder.ConfigureServices(services =>
             {
-                var urls = builder.GetSetting(WebHostDefaults.ServerUrlsKey);
-                if (!string.IsNullOrEmpty(urls))
-                {
-                    var stripped = StripUrlPaths(urls);
-                    builder.UseSetting(WebHostDefaults.ServerUrlsKey, stripped);
-                    Console.WriteLine($"[HttpSysStub] UseHttpSys → Kestrel ({stripped})");
-                }
-                else
-                {
-                    Console.WriteLine("[HttpSysStub] UseHttpSys → Kestrel (no URL configured)");
-                }
+                services.AddSingleton<IStartupFilter>(new UrlStrippingStartupFilter(_boundPorts));
             });
 
             return builder;
@@ -92,41 +80,83 @@ namespace Microsoft.AspNetCore.Hosting
 
         public static IWebHostBuilder UseHttpSys(this IWebHostBuilder builder)
         {
-            Console.WriteLine("[HttpSysStub] UseHttpSys redirected to UseKestrel");
             return builder.UseKestrel();
         }
+    }
 
-        private static string StripUrlPaths(string urls)
+    internal class UrlStrippingStartupFilter : IStartupFilter
+    {
+        private readonly System.Collections.Generic.HashSet<int> _boundPorts;
+
+        public UrlStrippingStartupFilter(System.Collections.Generic.HashSet<int> boundPorts)
         {
-            var parts = urls.Split(';')
-                .Select(url =>
-                {
-                    var trimmed = url.Trim();
-                    if (string.IsNullOrEmpty(trimmed)) return null;
-                    try
-                    {
-                        var parsed = trimmed
-                            .Replace("://+:", "://localhost:")
-                            .Replace("://*:", "://localhost:");
-                        var uri = new Uri(parsed);
-                        var scheme = trimmed.Substring(0, trimmed.IndexOf("://"));
-                        var host = trimmed.Contains("://+:") ? "+" :
-                                   trimmed.Contains("://*:") ? "*" : uri.Host;
-                        var port = uri.Port;
+            _boundPorts = boundPorts;
+        }
 
-                        // If this port is already bound by another host, assign next available
-                        // (BC creates multiple hosts on the same port with different paths)
-                        lock (_boundPorts)
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next)
+        {
+            return app =>
+            {
+                // Strip paths from server addresses before the server starts
+                var addressFeature = app.ServerFeatures.Get<IServerAddressesFeature>();
+                string? pathBase = null;
+                if (addressFeature != null && addressFeature.Addresses.Count > 0)
+                {
+                    var original = addressFeature.Addresses.ToList();
+                    addressFeature.Addresses.Clear();
+                    foreach (var addr in original)
+                    {
+                        var (stripped, path) = StripPath(addr);
+                        if (stripped != null)
                         {
-                            while (!_boundPorts.Add(port))
-                                port++;
+                            addressFeature.Addresses.Add(stripped);
+                            if (!string.IsNullOrEmpty(path))
+                                pathBase = path;
+                            Console.WriteLine($"[HttpSysStub] {addr} → {stripped}");
                         }
-                        return $"{scheme}://{host}:{port}";
+                        else
+                        {
+                            Console.WriteLine($"[HttpSysStub] {addr} → skipped (port in use)");
+                        }
                     }
-                    catch { return trimmed; }
-                })
-                .Where(s => s != null);
-            return string.Join(";", parts);
+                }
+
+                // Add path base so BC's middleware routes correctly
+                // e.g., requests to /BC/dev/packages get PathBase=/BC/dev, Path=/packages
+                if (!string.IsNullOrEmpty(pathBase))
+                {
+                    app.UsePathBase(pathBase);
+                }
+
+                next(app);
+            };
+        }
+
+        private (string? address, string? pathBase) StripPath(string url)
+        {
+            try
+            {
+                var parsed = url.Replace("://+:", "://localhost:").Replace("://*:", "://localhost:");
+                var uri = new Uri(parsed);
+                var scheme = url.Substring(0, url.IndexOf("://"));
+                var host = url.Contains("://+:") ? "+" : url.Contains("://*:") ? "*" : uri.Host;
+                var port = uri.Port;
+                var path = uri.AbsolutePath.TrimEnd('/');
+
+                lock (_boundPorts)
+                {
+                    if (!_boundPorts.Add(port))
+                    {
+                        // Port already bound — find next available
+                        while (!_boundPorts.Add(++port)) { }
+                    }
+                }
+                return ($"{scheme}://{host}:{port}", string.IsNullOrEmpty(path) || path == "/" ? null : path);
+            }
+            catch
+            {
+                return (url, null);
+            }
         }
     }
 }

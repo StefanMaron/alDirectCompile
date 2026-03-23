@@ -26,12 +26,8 @@ services:
       sql:
         condition: service_healthy
     ports:
-      - "7045:7045"
-      - "7047:7047"
-      - "7048:7048"
-      - "7049:7049"
-      - "7085:7085"
-      - "7086:7086"
+      - "7045-7054:7045-7054"
+      - "7085-7089:7085-7089"
     volumes:
       - bc-cache:/usr/share/Microsoft/Microsoft Dynamics NAV/270/Server
     tmpfs:
