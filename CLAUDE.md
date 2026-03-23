@@ -12,22 +12,25 @@ Run the real BC service tier on Linux with Docker SQL Server. Patch only the
 Linux-specific blockers via a .NET startup hook. Tests run in the real BC runtime
 with 100% fidelity.
 
-**Status (2026-03-23):** BC v27.5 boots on Linux, SQL connected, all extensions
-compiled, 7 Kestrel API hosts created. ONE remaining blocker (SPN registration).
+**Status (2026-03-23):** Full CI pipeline GREEN on GitHub Actions. BC v27.5 boots,
+compiles extensions, publishes apps, runs 5 AL tests via OData API. BCApps System
+Application (1264 files) compiles in ~6s locally. BCApps test execution blocked on
+server-side extension publish (DotNet type resolution issue).
 
-**See `docs/headless-service-tier.md` for full details.**
+**See `docs/ci-pipeline-progress.md` for detailed session progress.**
+**See `docs/performance-strategy.md` for optimization plans.**
 
 ```
 Docker SQL Server 2022 (CRONUS database)
     ↑ TCP
 DynamicsNavServer.Main() on Linux
     ↑ DOTNET_STARTUP_HOOKS
-StartupHook.dll (12 patches for Linux compat)
+StartupHook.dll (13 patches for Linux compat)
     + 6 stub DLL subprojects + libwin32_stubs.so
 ```
 
 Key files:
-- `StartupHook/StartupHook.cs` — All patches
+- `StartupHook/StartupHook.cs` — All 13 patches
 - `StartupHook/Dockerfile` — Docker container definition
 - `StartupHook/kernel32_stubs.c` — C shared library for P/Invoke stubs
 - `StartupHook/GenevaStub/` — OpenTelemetry.Exporter.Geneva stub
@@ -78,6 +81,8 @@ artifacts/             — BC platform artifacts (not checked in)
 docs/
   ├── headless-service-tier.md
   ├── headless-decision-history.md
+  ├── ci-pipeline-progress.md
+  ├── performance-strategy.md
   ├── runtime-analysis.md
   └── feature-compatibility-matrix.md
 ```
