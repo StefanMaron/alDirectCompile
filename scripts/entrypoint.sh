@@ -1,7 +1,7 @@
 #!/bin/bash
 # Self-contained BC service tier entrypoint.
 # Downloads artifacts, restores DB, configures BC, publishes test runner, starts server.
-set -e
+set -ex
 trap 'echo "[entrypoint] FAILED at line $LINENO: $BASH_COMMAND (exit $?)" >&2' ERR
 
 BC_TYPE="${BC_TYPE:-sandbox}"
