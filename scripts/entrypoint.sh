@@ -196,9 +196,12 @@ echo "[entrypoint] Database ready (admin / Admin123!)."
 # =============================================================================
 cd "$SERVICE_DIR"
 echo "[entrypoint] Starting BC service tier..."
-# Use cat to keep stdin open for /console mode (prevents EOF exit)
-cat /dev/zero | DOTNET_STARTUP_HOOKS=/bc/hook/StartupHook.dll dotnet Microsoft.Dynamics.Nav.Server.dll /console &
+# Start BC — use a FIFO to keep stdin open for /console mode
+mkfifo /tmp/bc-stdin 2>/dev/null || true
+DOTNET_STARTUP_HOOKS=/bc/hook/StartupHook.dll dotnet Microsoft.Dynamics.Nav.Server.dll /console < /tmp/bc-stdin &
 BC_PID=$!
+# Keep the FIFO writer open in background (prevents EOF)
+exec 3>/tmp/bc-stdin
 
 # Wait for dev endpoint to be ready, then publish test runner
 (
