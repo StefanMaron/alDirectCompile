@@ -18,7 +18,14 @@ SERVICE_DIR="/bc/service"
 # Step 1: Download artifacts if not already present
 # =============================================================================
 if [ ! -f "$ARTIFACTS/app/manifest.json" ]; then
-    if [ -n "$BC_ARTIFACT_URL" ]; then
+    if [ "$BC_ARTIFACT_URL" = "skip" ]; then
+        echo "[entrypoint] Waiting for artifacts to be provided externally..."
+        for i in $(seq 1 120); do
+            [ -f "$ARTIFACTS/app/manifest.json" ] && break
+            sleep 2
+        done
+        [ -f "$ARTIFACTS/app/manifest.json" ] || { echo "[entrypoint] ERROR: Artifacts not provided"; exit 1; }
+    elif [ -n "$BC_ARTIFACT_URL" ]; then
         echo "[entrypoint] Downloading BC from $BC_ARTIFACT_URL..."
         /bc/scripts/download-artifacts.sh "$BC_ARTIFACT_URL" "$ARTIFACTS"
     else
