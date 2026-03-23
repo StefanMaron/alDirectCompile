@@ -5,7 +5,9 @@ set -eo pipefail
 trap 'echo "[entrypoint] ERROR at line $LINENO: $BASH_COMMAND (exit $?)"' ERR
 
 # Unbuffered output for Docker log visibility
-exec 1> >(stdbuf -oL cat) 2>&1
+if command -v stdbuf &>/dev/null; then
+    exec 1> >(stdbuf -oL cat) 2>&1
+fi
 
 BC_TYPE="${BC_TYPE:-sandbox}"
 BC_VERSION="${BC_VERSION:-27.5.46862.48004}"
