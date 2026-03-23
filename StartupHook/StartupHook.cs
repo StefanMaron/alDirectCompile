@@ -518,8 +518,8 @@ internal class StartupHook
             var result = targetMethod?.Name switch
             {
                 "Encrypt" or "Decrypt" => args?[0], // pass-through
-                "get_IsKeyPresent" or "get_IsKeyCreated" => false,
-                "get_PublicKey" => "",
+                "get_IsKeyPresent" or "get_IsKeyCreated" => true,
+                "get_PublicKey" => "<RSAKeyValue><Modulus>xbzyD+SGxykyAv82XOEFtDzWEIok0MM5SAc+CS6Mq0W5LwiyXeakWyblq1XgYi3CDu700986ZVRi4KJjruZlzBeZ7IWXD4lEEpTCRuqoxasRTnwVpyVqGuHclJAnUpjeBS6HvaS/iesYWwxZcmlsmzJHvF3hXdDmLj+8GSKgo4IhschPCIpnoH8+FREX++VpwfZH1ejMk5Izds/ZI70Xc/OWfRfaYy3rtCFeZQ1R5T1AhlNJDgpn0a1oP86F8yDGYawB2GJKIewdcWE8usu4QesrFnlS1g/IJcFXe71/TiJjryqRJPk8ze3Jh9+atx57OnI4R3QvuM/lQ7YoN1RVjw==</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>",
                 _ => null,
             };
             if (targetMethod?.Name == "Decrypt" || targetMethod?.Name == "Encrypt")
