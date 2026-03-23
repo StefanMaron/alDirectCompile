@@ -240,6 +240,14 @@ grep -E "DatabaseServer|DatabaseName|DatabaseUserName|ProtectedDatabase" "$SERVI
 echo "[entrypoint] Starting BC service tier..."
 # Start BC — use a FIFO to keep stdin open for /console mode
 mkfifo /tmp/bc-stdin 2>/dev/null || true
+
+# .NET runtime tuning for BC service tier performance:
+# - Server GC: better throughput for multi-threaded workloads (extension compilation)
+# - Tiered compilation: faster JIT startup, hot paths get optimized later
+export DOTNET_gcServer=1
+export DOTNET_TieredCompilation=1
+export DOTNET_TC_QuickJitForLoops=1
+
 DOTNET_STARTUP_HOOKS=/bc/hook/StartupHook.dll dotnet Microsoft.Dynamics.Nav.Server.dll /console < /tmp/bc-stdin &
 BC_PID=$!
 # Keep the FIFO writer open in background (prevents EOF)
