@@ -243,10 +243,10 @@ mkfifo /tmp/bc-stdin 2>/dev/null || true
 
 # .NET runtime tuning for BC service tier performance:
 # - Server GC: better throughput for multi-threaded workloads (extension compilation)
-# - Tiered compilation: faster JIT startup, hot paths get optimized later
+# - Tiered compilation: DISABLED to prevent JMP hooks from being overwritten by Tier 1 recompilation.
+#   The Watson crash handler patch relies on JMP hooks staying in place.
 export DOTNET_gcServer=1
-export DOTNET_TieredCompilation=1
-export DOTNET_TC_QuickJitForLoops=1
+export DOTNET_TieredCompilation=0
 
 DOTNET_STARTUP_HOOKS=/bc/hook/StartupHook.dll dotnet Microsoft.Dynamics.Nav.Server.dll /console < /tmp/bc-stdin &
 BC_PID=$!

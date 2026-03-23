@@ -6,6 +6,7 @@ using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
+using System.Threading.Tasks;
 
 /// <summary>
 /// .NET Startup Hook that patches the BC service tier to run on Linux.
@@ -55,6 +56,49 @@ internal class StartupHook
 
 
         Console.WriteLine("[StartupHook] Initializing Linux compatibility patches...");
+
+        // Patch #13 (early): Prevent Watson crash on unobserved task exceptions.
+        // Watson's SendReport → GetRegistryValue crashes on Linux (NullRef, no registry).
+        // BC registers its handler on NavEnvironment..ctor that calls Watson and crashes.
+        // Strategy: aggressively strip BC's handler every second, and keep our safe handler.
+        EventHandler<UnobservedTaskExceptionEventArgs> safeHandler = (sender, args) =>
+        {
+            Console.WriteLine($"[StartupHook] Caught unobserved task exception: {args.Exception?.InnerException?.GetType().Name}: {args.Exception?.InnerException?.Message}");
+            args.SetObserved();
+        };
+        TaskScheduler.UnobservedTaskException += safeHandler;
+
+        // Aggressively strip BC's Watson handler - check every second
+        var _safeHandlerRef = safeHandler; // prevent GC
+        new System.Threading.Timer(_ =>
+        {
+            try
+            {
+                // .NET 8: the backing field is "UnobservedTaskException" (static event field)
+                var field = typeof(TaskScheduler).GetField("UnobservedTaskException",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                if (field == null)
+                {
+                    field = typeof(TaskScheduler).GetField("_unobservedTaskException",
+                        BindingFlags.NonPublic | BindingFlags.Static);
+                }
+                if (field != null)
+                {
+                    var currentDelegate = field.GetValue(null) as Delegate;
+                    if (currentDelegate != null)
+                    {
+                        var invocationList = currentDelegate.GetInvocationList();
+                        if (invocationList.Length > 1)
+                        {
+                            // Replace entire event with just our safe handler
+                            field.SetValue(null, _safeHandlerRef);
+                            Console.WriteLine($"[StartupHook] Removed {invocationList.Length - 1} Watson crash handler(s)");
+                        }
+                    }
+                }
+            }
+            catch { }
+        }, null, TimeSpan.FromMilliseconds(500), TimeSpan.FromSeconds(1));
 
         // Patch #3: Load kernel32 stubs for P/Invoke interception
         LoadKernel32Stubs();
@@ -368,20 +412,67 @@ internal class StartupHook
 
     // ========================================================================
     // Patch #13: Watson crash reporting (requires Windows registry)
+    // Hook all Watson entry points to prevent NullRef crash on Linux.
+    // The crash chain: SendReport → GetWatsonPath → GetRegistryValue → NullRef
+    // We hook all three levels for robustness (JIT timing, inlining).
     // ========================================================================
     private static void PatchWatsonReporting(Assembly watsonAsm)
     {
         try
         {
-            var sendReport = watsonAsm.GetType("Microsoft.Dynamics.Nav.Watson.WatsonReporting")
-                ?.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
-                .FirstOrDefault(m => m.Name == "SendReport");
-            if (sendReport != null)
+            var watsonType = watsonAsm.GetType("Microsoft.Dynamics.Nav.Watson.WatsonReporting");
+            if (watsonType == null)
             {
-                var noop = typeof(StartupHook).GetMethod(nameof(WatsonSendReportNoop),
-                    BindingFlags.Static | BindingFlags.NonPublic);
-                ApplyJmpHook(sendReport, noop!, "WatsonReporting.SendReport");
+                Console.WriteLine("[StartupHook] Watson: WatsonReporting type not found");
+                return;
             }
+
+            var noop = typeof(StartupHook).GetMethod(nameof(WatsonSendReportNoop),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            var noopStr = typeof(StartupHook).GetMethod(nameof(WatsonGetRegistryValueNoop),
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+
+            int hooked = 0;
+            // Hook ALL SendReport overloads
+            foreach (var m in watsonType.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+                .Where(m => m.Name == "SendReport"))
+            {
+                ApplyJmpHook(m, noop, $"WatsonReporting.SendReport({m.GetParameters().Length} params)");
+                hooked++;
+            }
+
+            // Hook GetWatsonPath (called by SendReport)
+            var getPath = watsonType.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+                .FirstOrDefault(m => m.Name == "GetWatsonPath");
+            if (getPath != null)
+            {
+                ApplyJmpHook(getPath, noopStr, "WatsonReporting.GetWatsonPath");
+                hooked++;
+            }
+
+            // Hook GetRegistryValue (the actual crasher — NullRef on Linux)
+            var getRegVal = watsonType.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+                .FirstOrDefault(m => m.Name == "GetRegistryValue");
+            if (getRegVal != null)
+            {
+                ApplyJmpHook(getRegVal, noopStr, "WatsonReporting.GetRegistryValue");
+                hooked++;
+            }
+
+            // Hook WriteWatsonLog on the Server class if we can find it
+            var serverType = watsonAsm.GetType("Microsoft.Dynamics.Nav.Service.Server");
+            if (serverType != null)
+            {
+                var writeWatson = serverType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                    .FirstOrDefault(m => m.Name == "WriteWatsonLog");
+                if (writeWatson != null)
+                {
+                    ApplyJmpHook(writeWatson, noop, "Server.WriteWatsonLog");
+                    hooked++;
+                }
+            }
+
+            Console.WriteLine($"[StartupHook] Watson: hooked {hooked} methods");
         }
         catch (Exception ex)
         {
@@ -390,6 +481,7 @@ internal class StartupHook
     }
 
     private static void WatsonSendReportNoop() { }
+    private static string? WatsonGetRegistryValueNoop() => null;
 
     private static void PatchNavTypes(Assembly navTypes)
     {
