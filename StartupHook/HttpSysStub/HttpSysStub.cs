@@ -125,6 +125,7 @@ namespace Microsoft.AspNetCore.Hosting
                 // e.g., requests to /BC/dev/packages get PathBase=/BC/dev, Path=/packages
                 if (!string.IsNullOrEmpty(pathBase))
                 {
+                    Console.WriteLine($"[HttpSysStub] UsePathBase({pathBase})");
                     app.UsePathBase(pathBase);
                 }
 
