@@ -38,15 +38,19 @@ echo "[entrypoint] Platform: $PLATFORM_VERSION, NAV dir: $NAV_DIR, DB: $DB_FILE"
 # =============================================================================
 if [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ]; then
     echo "[entrypoint] Setting up service tier..."
-    SRC="$ARTIFACTS/platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/$NAV_DIR/Service"
-    if [ ! -d "$SRC" ]; then
-        echo "[entrypoint] ERROR: Service tier not found at $SRC"
-        ls "$ARTIFACTS/platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/" 2>/dev/null
+    # Auto-detect service tier path (differs between versions: PFiles64 vs "program files")
+    SRC=$(find "$ARTIFACTS/platform/ServiceTier" -name "Microsoft.Dynamics.Nav.Server.dll" -printf "%h\n" 2>/dev/null | head -1)
+    if [ -z "$SRC" ] || [ ! -d "$SRC" ]; then
+        echo "[entrypoint] ERROR: Service tier not found in $ARTIFACTS/platform/ServiceTier/"
+        find "$ARTIFACTS/platform/ServiceTier" -maxdepth 4 -type d 2>/dev/null
         exit 1
     fi
+    echo "[entrypoint] Found service tier at: $SRC"
     cp -r "$SRC/." "$SERVICE_DIR/"
 
-    # Create temp directory BC expects
+    # Create temp directory BC expects (detect NAV_DIR from actual path)
+    NAV_DIR=$(echo "$SRC" | grep -oP '\d{3}(?=/Service)')
+    [ -z "$NAV_DIR" ] && NAV_DIR="${MAJOR_VERSION}0"
     mkdir -p "/usr/share/Microsoft/Microsoft Dynamics NAV/$NAV_DIR/Server"
 
     # Override framework DLLs

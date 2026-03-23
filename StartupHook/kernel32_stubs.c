@@ -106,6 +106,21 @@ uint64_t GetTickCount64(void) {
     return (uint64_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
 
+// --- Computer name (DnsHelper on v26 needs this) ---
+int GetComputerNameExW(int format, uint16_t* buffer, int* size) {
+    // Return a simple hostname in UTF-16LE
+    const char* name = "bcserver";
+    int len = 8; // strlen("bcserver")
+    if (buffer == 0 || *size < len + 1) {
+        *size = len + 1;
+        return 0; // ERROR_MORE_DATA triggers retry with correct buffer size
+    }
+    for (int i = 0; i < len; i++) buffer[i] = (uint16_t)name[i];
+    buffer[len] = 0;
+    *size = len;
+    return 1; // success
+}
+
 // --- General ---
 uint32_t GetLastError(void) { return 0; }
 HANDLE GetCurrentProcess(void) { return (HANDLE)-1; }
