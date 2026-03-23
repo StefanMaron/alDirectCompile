@@ -209,6 +209,8 @@ else
     }
 fi
 
+echo "[entrypoint] Config check:"
+grep -E "DatabaseServer|DatabaseName|DatabaseUserName|ProtectedDatabase" "$SERVICE_DIR/CustomSettings.config" | head -5
 echo "[entrypoint] Starting BC service tier..."
 # Start BC — use a FIFO to keep stdin open for /console mode
 mkfifo /tmp/bc-stdin 2>/dev/null || true
