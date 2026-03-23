@@ -2,6 +2,9 @@
 # Self-contained BC service tier entrypoint.
 # Downloads artifacts, restores DB, configures BC, publishes test runner, starts server.
 set -e
+# Merge stdout into stderr so Docker captures all output immediately
+# (stdout is pipe-buffered when PID 1 has no TTY; stderr is unbuffered)
+exec 1>&2
 echo "[entrypoint] Script started at $(date)"
 
 BC_TYPE="${BC_TYPE:-sandbox}"

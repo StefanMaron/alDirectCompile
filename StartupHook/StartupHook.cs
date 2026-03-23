@@ -63,6 +63,9 @@ internal class StartupHook
         ReplaceWithStub("OpenTelemetry.Exporter.Geneva.dll", "Geneva ETW exporter");
         ReplaceWithStub("Microsoft.Data.SqlClient.dll", "cross-platform SqlClient");
 
+        // Verify SqlClient loads correctly (catches version/dependency issues early)
+        VerifySqlClientLoads();
+
         // Patch #6: System.Drawing requires strong name bypass — use assembly resolver
         // Register managed assembly resolver (once, for all stubs below)
         AssemblyLoadContext.Default.Resolving += ResolveStubAssembly;
@@ -536,6 +539,27 @@ internal class StartupHook
     // ========================================================================
     // Patch #5c: Replace Geneva DLL with no-op stub
     // ========================================================================
+
+    /// <summary>
+    /// Pre-load Microsoft.Data.SqlClient to catch missing dependencies early
+    /// with a clear error message (instead of a cryptic FileNotFoundException deep in BC startup).
+    /// </summary>
+    private static void VerifySqlClientLoads()
+    {
+        try
+        {
+            var asm = Assembly.LoadFrom(Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory ?? ".",
+                "Microsoft.Data.SqlClient.dll"));
+            Console.WriteLine($"[StartupHook] SqlClient verified: {asm.FullName}");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[StartupHook] WARNING: SqlClient pre-load failed: {ex}");
+            if (ex.InnerException != null)
+                Console.Error.WriteLine($"[StartupHook]   Inner: {ex.InnerException}");
+        }
+    }
 
     /// <summary>
     /// Replace a DLL in the service directory with a no-op stub from our publish directory.
