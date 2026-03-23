@@ -17,8 +17,13 @@ SERVICE_DIR="/bc/service"
 # Step 1: Download artifacts if not already present
 # =============================================================================
 if [ ! -f "$ARTIFACTS/app/manifest.json" ]; then
-    echo "[entrypoint] Downloading BC $BC_TYPE $BC_VERSION ($BC_COUNTRY)..."
-    /bc/scripts/download-artifacts.sh "$BC_TYPE" "$BC_VERSION" "$BC_COUNTRY" "$ARTIFACTS"
+    if [ -n "$BC_ARTIFACT_URL" ]; then
+        echo "[entrypoint] Downloading BC from $BC_ARTIFACT_URL..."
+        /bc/scripts/download-artifacts.sh "$BC_ARTIFACT_URL" "$ARTIFACTS"
+    else
+        echo "[entrypoint] Downloading BC $BC_TYPE $BC_VERSION ($BC_COUNTRY)..."
+        /bc/scripts/download-artifacts.sh "$BC_TYPE" "$BC_VERSION" "$BC_COUNTRY" "$ARTIFACTS"
+    fi
 else
     echo "[entrypoint] Artifacts already cached."
 fi

@@ -29,6 +29,7 @@ services:
       - "7045-7054:7045-7054"
       - "7085-7089:7085-7089"
     environment:
+      BC_ARTIFACT_URL: ${BC_ARTIFACT_URL:-}
       BC_TYPE: ${BC_TYPE:-sandbox}
       BC_VERSION: ${BC_VERSION:-27.5.46862.48004}
       BC_COUNTRY: ${BC_COUNTRY:-w1}
