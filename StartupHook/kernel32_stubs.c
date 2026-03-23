@@ -279,6 +279,19 @@ uint32_t HttpSetServerSessionProperty(uint64_t sessionId, int property, void* in
 // advapi32.dll — Security/Registry (may be needed later)
 // =============================================================================
 
+// --- Registry access (SqlClient needs this for connection string parsing) ---
+int RegOpenKeyExW(HANDLE hKey, const void* subKey, uint32_t options, uint32_t samDesired, HANDLE* result) {
+    *result = 0;
+    return 2; // ERROR_FILE_NOT_FOUND — key doesn't exist
+}
+
+int RegQueryValueExW(HANDLE hKey, const void* valueName, uint32_t* reserved,
+                     uint32_t* type, void* data, uint32_t* cbData) {
+    return 2; // ERROR_FILE_NOT_FOUND
+}
+
+int RegCloseKey(HANDLE hKey) { return 0; }
+
 HANDLE RegisterEventSourceW(const void* server, const void* source) {
     return (HANDLE)0xEEEE;
 }

@@ -43,6 +43,8 @@ internal class StartupHook
     private static Assembly? _navNclAssembly;
     private static IntPtr _kernel32StubHandle;
     private static object? _noopEncryptionProvider;
+    private static bool _encryptionBypassed;
+    private static bool _encryptionApplying;
     private static object? _originalTopology;
 
     public static void Initialize()
@@ -56,8 +58,9 @@ internal class StartupHook
         LoadKernel32Stubs();
 
 
-        // Patch #5c: Replace Geneva DLL (unsigned, can copy directly)
+        // Replace DLLs with stubs or cross-platform versions (unsigned, can copy directly)
         ReplaceWithStub("OpenTelemetry.Exporter.Geneva.dll", "Geneva ETW exporter");
+        ReplaceWithStub("Microsoft.Data.SqlClient.dll", "cross-platform SqlClient");
 
         // Patch #6: System.Drawing requires strong name bypass — use assembly resolver
         // Register managed assembly resolver (once, for all stubs below)
@@ -87,10 +90,16 @@ internal class StartupHook
             PatchNavEnvironment(args.LoadedAssembly);
         }
 
-        // Re-apply patches after Main() overrides them during init
+        // Re-apply encryption bypass after Main() overrides it.
+        // Guard against recursion (DispatchProxy.Create triggers assembly loads).
+        if (!_encryptionBypassed && !_encryptionApplying && name == "Microsoft.Dynamics.Nav.Core")
+        {
+            _encryptionApplying = true;
+            try { ReapplyEncryptionBypass(); }
+            finally { _encryptionApplying = false; }
+        }
         if (name == "Microsoft.Dynamics.Nav.Core")
         {
-            ReapplyEncryptionBypass();
             ReapplyTopologyProxy();
         }
 
@@ -458,10 +467,20 @@ internal class StartupHook
     /// DispatchProxy subclass that no-ops all method calls.
     /// Used to create runtime implementations of BC interfaces without compile-time references.
     /// </summary>
+    /// <summary>
+    /// No-op proxy, but for IEventLogEntryWriter, log to Console instead of Windows Event Log.
+    /// </summary>
     public class NoOpDispatchProxy : DispatchProxy
     {
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
+            // Redirect EventLog writes to Console so we can see errors
+            if (targetMethod?.Name == "WriteEntry" && args?.Length >= 2)
+            {
+                var message = args[1]?.ToString();
+                if (message != null && message.Length > 10)
+                    Console.Error.WriteLine($"[BC-EventLog] {message}");
+            }
             return null;
         }
     }
@@ -496,13 +515,19 @@ internal class StartupHook
     {
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
-            return targetMethod?.Name switch
+            var result = targetMethod?.Name switch
             {
                 "Encrypt" or "Decrypt" => args?[0], // pass-through
                 "get_IsKeyPresent" or "get_IsKeyCreated" => false,
                 "get_PublicKey" => "",
                 _ => null,
             };
+            if (targetMethod?.Name == "Decrypt" || targetMethod?.Name == "Encrypt")
+            {
+                _encryptionBypassed = true;
+                Console.WriteLine($"[StartupHook] Encryption.{targetMethod.Name}() called — bypass working");
+            }
+            return result;
         }
     }
 
@@ -591,29 +616,36 @@ internal class StartupHook
                 }
             }
 
-            // Strategy 2: Also replace ServerInstanceRsaEncryptionProvider.Instance
-            // Main() sets the factory to () => ServerInstanceRsaEncryptionProvider.Instance
-            // If we replace Instance with our proxy, the factory returns our proxy
+            // Strategy 2: Replace BOTH the instance field AND the public Factory delegate
+            // on ServerInstanceRsaEncryptionProvider. Main() uses Factory which defaults to
+            // () => Instance. We replace both so all code paths return our proxy.
             if (navCoreAsm != null)
             {
                 Type? rsaProvType = navCoreAsm.GetType("Microsoft.Dynamics.Nav.Core.ServerInstanceRsaEncryptionProvider");
                 if (rsaProvType != null)
                 {
+                    // Replace the private 'instance' field (used by Instance getter)
                     var instanceField = rsaProvType.GetField("instance",
                         BindingFlags.Static | BindingFlags.NonPublic);
-                    var instanceProp = rsaProvType.GetProperty("Instance",
-                        BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-
                     if (instanceField != null)
-                    {
                         instanceField.SetValue(null, _noopEncryptionProvider);
-                        Console.WriteLine("[StartupHook] Replaced ServerInstanceRsaEncryptionProvider.Instance");
-                    }
-                    else if (instanceProp?.SetMethod != null)
+
+                    // Replace the public 'Factory' delegate field
+                    var factoryField = rsaProvType.GetField("Factory",
+                        BindingFlags.Static | BindingFlags.Public);
+                    if (factoryField != null)
                     {
-                        instanceProp.SetValue(null, _noopEncryptionProvider);
-                        Console.WriteLine("[StartupHook] Replaced ServerInstanceRsaEncryptionProvider.Instance (via property)");
+                        var funcType = typeof(Func<>).MakeGenericType(encIfaceType);
+                        var dm = new DynamicMethod("GetProxy", encIfaceType, Type.EmptyTypes,
+                            typeof(StartupHook).Module, skipVisibility: true);
+                        var il = dm.GetILGenerator();
+                        il.Emit(OpCodes.Ldsfld, typeof(StartupHook).GetField(nameof(_noopEncryptionProvider),
+                            BindingFlags.Static | BindingFlags.NonPublic)!);
+                        il.Emit(OpCodes.Ret);
+                        factoryField.SetValue(null, dm.CreateDelegate(funcType));
                     }
+
+                    Console.WriteLine("[StartupHook] Replaced encryption Instance + Factory");
                 }
             }
 
