@@ -3,16 +3,16 @@ services:
     image: mcr.microsoft.com/mssql/server:2022-latest
     environment:
       ACCEPT_EULA: "Y"
-      SA_PASSWORD: "Passw0rd123!"
+      SA_PASSWORD: ${SA_PASSWORD:-Passw0rd123!}
       MSSQL_MEMORY_LIMIT_MB: "2048"
     ports:
       - "11433:1433"
     volumes:
-      - ./artifacts/sandbox/27.5.46862.48004/w1:/backup:ro
+      - bc-artifacts:/bc/artifacts:ro
     tmpfs:
       - /var/opt/mssql/data:size=2g
     healthcheck:
-      test: /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Passw0rd123!' -C -No -Q "SELECT 1" || exit 1
+      test: /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P '${SA_PASSWORD:-Passw0rd123!}' -C -No -Q "SELECT 1" || exit 1
       interval: 10s
       retries: 10
       start_period: 20s
@@ -28,10 +28,14 @@ services:
     ports:
       - "7045-7054:7045-7054"
       - "7085-7089:7085-7089"
+    environment:
+      BC_TYPE: ${BC_TYPE:-sandbox}
+      BC_VERSION: ${BC_VERSION:-27.5.46862.48004}
+      BC_COUNTRY: ${BC_COUNTRY:-w1}
+      SA_PASSWORD: ${SA_PASSWORD:-Passw0rd123!}
+      SQL_SERVER: sql
     volumes:
-      - bc-cache:/usr/share/Microsoft/Microsoft Dynamics NAV/270/Server
-    tmpfs:
-      - /tmp:size=512m
+      - bc-artifacts:/bc/artifacts
 
 volumes:
-  bc-cache:
+  bc-artifacts:
