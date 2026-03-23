@@ -30,7 +30,9 @@ else
 fi
 
 # Read manifest
+echo "[entrypoint] Reading manifest..."
 MANIFEST="$ARTIFACTS/app/manifest.json"
+ls -la "$MANIFEST" || { echo "[entrypoint] FATAL: manifest.json not found at $MANIFEST"; exit 1; }
 DB_FILE=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('database',''))")
 LICENSE_FILE=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('licenseFile',''))")
 PLATFORM_VERSION=$(python3 -c "import json; print(json.load(open('$MANIFEST'))['platform'])")
