@@ -12,10 +12,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY ["StartupHook/bin/Release/net8.0/publish/", "/bc/hook/"]
 
 # Copy patched DLLs (Cecil-modified to fix Linux-specific bugs)
+# Includes: CodeAnalysis.dll, Mono.Cecil.dll, merged assemblies (netstandard, OpenXml, Drawing, Core)
 COPY ["StartupHook/patched/", "/bc/patched/"]
 
-# Copy .NET reference assemblies (for server-side compiler type-forwarding resolution)
+# Copy .NET reference assemblies (originals — used as base, overridden by forwarding assemblies)
 COPY ["StartupHook/refasm/", "/bc/refasm/"]
+
+# Copy DrawingStub to Add-Ins dir (compile-time type resolution for System.Drawing.Common)
+# This is SEPARATE from /bc/hook/ DrawingStub which is loaded at runtime
+COPY ["StartupHook/DrawingStub/bin/Release/net8.0/System.Drawing.Common.dll", "/bc/addins-overlay/System.Drawing.Common.dll"]
 
 # Copy scripts and test runner
 COPY ["scripts/download-artifacts.sh", "scripts/entrypoint.sh", "/bc/scripts/"]

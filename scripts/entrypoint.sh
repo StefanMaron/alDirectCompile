@@ -7,6 +7,20 @@ set -e
 exec 1>&2
 echo "[entrypoint] Script started at $(date)"
 
+# Restore runtime DLLs from .bak if they exist (container restart recovery).
+# Patch #15 renames runtime DLLs AFTER BC loads them into memory.
+# On restart, BC needs the real DLLs to boot, so we restore first.
+RUNTIME_DIR=$(ls -d /usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.* 2>/dev/null | head -1)
+if [ -n "$RUNTIME_DIR" ]; then
+    RESTORE_COUNT=0
+    for bak in "$RUNTIME_DIR"/*.dll.bak; do
+        [ -f "$bak" ] || continue
+        mv "$bak" "${bak%.bak}"
+        RESTORE_COUNT=$((RESTORE_COUNT + 1))
+    done
+    [ $RESTORE_COUNT -gt 0 ] && echo "[entrypoint] Restored $RESTORE_COUNT runtime DLLs from .bak (restart recovery)"
+fi
+
 BC_TYPE="${BC_TYPE:-sandbox}"
 BC_VERSION="${BC_VERSION:-27.5.46862.48004}"
 BC_COUNTRY="${BC_COUNTRY:-w1}"
@@ -142,13 +156,39 @@ if [ -d "$SERVICE_DIR/Add-ins" ] && [ ! -d "$SERVICE_DIR/Add-Ins" ]; then
 fi
 ADDINS_DIR="$SERVICE_DIR/Add-Ins"
 
-# Copy .NET REFERENCE assemblies to Add-Ins for Cecil type-forwarding resolution.
-# Reference assemblies are small (4MB total), always managed (no R2R), and contain
-# full type signatures. Runtime DLLs can't be used because many are R2R/native
-# which crash Cecil's metadata reader.
+# Patch #16: Deploy assemblies for server-side compiler type resolution.
+# Three layers deployed to Add-Ins in order:
+#   1. Base refasm: .NET 8 reference assemblies (full type metadata, no R2R)
+#   2. Forwarding assemblies: redirect refasm types → netstandard-merged.dll
+#      (eliminates type identity duplication between AL code and BC DLL params)
+#   3. Merged assemblies: netstandard/OpenXml/Drawing/Core with resolved type-forwards
+#   4. DrawingStub: compile-time System.Drawing.Common with framework type refs
 if [ ! -f "$ADDINS_DIR/System.Runtime.dll" ] && [ -d /bc/refasm ]; then
+    # Layer 1: base reference assemblies
     cp /bc/refasm/*.dll "$ADDINS_DIR/" 2>/dev/null || true
-    echo "[entrypoint] Copied .NET reference assemblies to Add-Ins ($(ls /bc/refasm/*.dll | wc -l) files)"
+    echo "[entrypoint] Copied .NET reference assemblies to Add-Ins ($(ls /bc/refasm/*.dll 2>/dev/null | wc -l) files)"
+
+    # Layer 2: forwarding assemblies (override refasm with type-forwards to netstandard)
+    if [ -d /bc/patched/refasm-forwarding ]; then
+        cp /bc/patched/refasm-forwarding/*.dll "$ADDINS_DIR/" 2>/dev/null || true
+        echo "[entrypoint] Applied forwarding assemblies ($(ls /bc/patched/refasm-forwarding/*.dll 2>/dev/null | wc -l) files)"
+    fi
+
+    # Layer 3: merged assemblies (deploy with original filenames)
+    for merged in netstandard:netstandard-merged DocumentFormat.OpenXml:DocumentFormat.OpenXml-merged System.Drawing:System.Drawing-merged System.Core:System.Core-merged; do
+        TARGET="${merged%%:*}.dll"
+        SRC="${merged##*:}.dll"
+        if [ -f "/bc/patched/$SRC" ]; then
+            cp "/bc/patched/$SRC" "$ADDINS_DIR/$TARGET"
+        fi
+    done
+    echo "[entrypoint] Applied merged type-forward assemblies"
+
+    # Layer 4: DrawingStub for compile-time (uses framework Color/Rectangle refs)
+    if [ -f /bc/addins-overlay/System.Drawing.Common.dll ]; then
+        cp /bc/addins-overlay/System.Drawing.Common.dll "$ADDINS_DIR/System.Drawing.Common.dll"
+        echo "[entrypoint] Applied DrawingStub to Add-Ins (compile-time)"
+    fi
 fi
 
 
@@ -319,12 +359,23 @@ exec 3>/tmp/bc-stdin
     # Patch #15: After BC has loaded all runtime DLLs into memory, rename them so
     # Cecil's probing paths can't find them. This forces all assembly resolution
     # to use our managed reference assemblies from Add-Ins.
-    RUNTIME_DIR="/usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.25"
-    if [ -d "$RUNTIME_DIR" ] && [ -d "$ADDINS_DIR" ]; then
+    # First restore any .bak files from a previous run (container restart safety).
+    RUNTIME_DIR=$(ls -d /usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.* 2>/dev/null | head -1)
+    if [ -n "$RUNTIME_DIR" ] && [ -d "$ADDINS_DIR" ]; then
+        # Restore .bak→.dll from any previous Patch #15 run
+        RESTORE_COUNT=0
+        for bak in "$RUNTIME_DIR"/*.dll.bak; do
+            [ -f "$bak" ] || continue
+            mv "$bak" "${bak%.bak}"
+            RESTORE_COUNT=$((RESTORE_COUNT + 1))
+        done
+        [ $RESTORE_COUNT -gt 0 ] && echo "[entrypoint] Patch #15: Restored $RESTORE_COUNT runtime DLLs from .bak (restart recovery)"
+
+        # Now rename runtime DLLs that we have Add-Ins replacements for
         RENAMED=0
         for refasm in "$ADDINS_DIR"/*.dll; do
             fname=$(basename "$refasm")
-            if [ -f "$RUNTIME_DIR/$fname" ] && [ ! -f "$RUNTIME_DIR/${fname}.bak" ]; then
+            if [ -f "$RUNTIME_DIR/$fname" ]; then
                 mv "$RUNTIME_DIR/$fname" "$RUNTIME_DIR/${fname}.bak"
                 RENAMED=$((RENAMED + 1))
             fi

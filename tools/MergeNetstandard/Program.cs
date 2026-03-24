@@ -844,13 +844,35 @@ class Program
                     newMethod.Parameters.Add(newParam);
                 }
 
-                // Stub body: throw null (for non-abstract, non-extern methods)
+                // Stub body: return default (for non-abstract, non-extern methods)
+                // Use return-default instead of throw-null so stubs don't crash at runtime
+                // (Add-Ins is a runtime probing path too, e.g. ImageFormatConverter during schema sync)
                 if (method.HasBody)
                 {
                     newMethod.Body = new Mono.Cecil.Cil.MethodBody(newMethod);
                     var il = newMethod.Body.GetILProcessor();
-                    il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Ldnull));
-                    il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Throw));
+                    var retType = newMethod.ReturnType;
+                    if (retType.FullName == "System.Void")
+                    {
+                        il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Ret));
+                    }
+                    else if (retType.IsValueType || retType is GenericParameter)
+                    {
+                        // For value types: create local, load default, return
+                        var local = new Mono.Cecil.Cil.VariableDefinition(retType);
+                        newMethod.Body.Variables.Add(local);
+                        newMethod.Body.InitLocals = true;
+                        il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Ldloca_S, local));
+                        il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Initobj, retType));
+                        il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Ldloc_0));
+                        il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Ret));
+                    }
+                    else
+                    {
+                        // For reference types: return null
+                        il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Ldnull));
+                        il.Append(il.Create(Mono.Cecil.Cil.OpCodes.Ret));
+                    }
                 }
 
                 newType.Methods.Add(newMethod);
