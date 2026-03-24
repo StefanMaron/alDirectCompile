@@ -56,7 +56,211 @@ class Program
             outputPath: Path.Combine(PatchedDir, "System.Core-merged.dll"),
             extraSearchDirs: new[] { WebClientRefsDir });
 
+        Console.WriteLine("\n" + new string('=', 70) + "\n");
+
+        // 5. Post-process: Convert refasm TypeDefinitions to type-forwards (ExportedTypes)
+        // pointing to netstandard, so Cecil's Resolve() lands on the same TypeDefinition
+        // as the AL code's GetType() on netstandard-merged.dll.
+        RedirectRefasmToNetstandard();
+
         Console.WriteLine("\nAll merges complete.");
+    }
+
+    /// <summary>
+    /// For each refasm assembly, create a new "forwarding" assembly that type-forwards
+    /// ALL types to netstandard. This replaces the original refasm assembly in the
+    /// patched output directory. When Cecil's Resolve() follows a BC DLL TypeReference,
+    /// it finds the forwarding assembly, follows the ExportedType to netstandard-merged.dll,
+    /// and lands on the same TypeDefinition that GetType() finds for AL DotNet types.
+    /// </summary>
+    static void RedirectRefasmToNetstandard()
+    {
+        var mergedPath = Path.Combine(PatchedDir, "netstandard-merged.dll");
+        if (!File.Exists(mergedPath))
+        {
+            Console.WriteLine("  SKIP: netstandard-merged.dll not found");
+            return;
+        }
+
+        // Load merged assembly to get the set of types it defines
+        using var mergedAsm = AssemblyDefinition.ReadAssembly(mergedPath, new ReaderParameters { ReadSymbols = false });
+        var mergedTypes = new HashSet<string>();
+        CollectTypeNames(mergedAsm.MainModule.Types, mergedTypes);
+
+        Console.WriteLine($"Netstandard-merged has {mergedTypes.Count} types available for redirects");
+
+        // Create the forwarding output directory
+        var forwardDir = Path.Combine(PatchedDir, "refasm-forwarding");
+        Directory.CreateDirectory(forwardDir);
+
+        var refAsmFiles = Directory.GetFiles(RefAsmDir, "*.dll");
+        int totalRedirected = 0;
+
+        foreach (var refPath in refAsmFiles)
+        {
+            var fileName = Path.GetFileNameWithoutExtension(refPath);
+            // Skip assemblies we replace entirely
+            if (fileName is "netstandard") continue;
+
+            try
+            {
+                using var refAsm = AssemblyDefinition.ReadAssembly(refPath, new ReaderParameters { ReadSymbols = false });
+                var module = refAsm.MainModule;
+
+                // Find top-level types that are ALSO in netstandard-merged.dll
+                var typesToForward = new List<TypeDefinition>();
+                foreach (var type in module.Types)
+                {
+                    if (type.Name == "<Module>") continue;
+                    if (mergedTypes.Contains(type.FullName))
+                        typesToForward.Add(type);
+                }
+
+                if (typesToForward.Count == 0) continue;
+
+                // Create a new assembly with ONLY type-forwards for the matching types
+                var newAsm = AssemblyDefinition.CreateAssembly(
+                    refAsm.Name, refAsm.Name.Name, ModuleKind.Dll);
+                var newModule = newAsm.MainModule;
+
+                // Add netstandard assembly reference
+                var netstdRef = new AssemblyNameReference("netstandard", mergedAsm.Name.Version)
+                {
+                    PublicKeyToken = mergedAsm.Name.PublicKeyToken
+                };
+                newModule.AssemblyReferences.Add(netstdRef);
+
+                // Add type-forwards (ExportedTypes)
+                foreach (var type in typesToForward)
+                {
+                    var exportedType = new ExportedType(type.Namespace, type.Name,
+                        newModule, netstdRef)
+                    { Attributes = TypeAttributes.Forwarder };
+                    newModule.ExportedTypes.Add(exportedType);
+                }
+
+                var outputPath = Path.Combine(forwardDir, Path.GetFileName(refPath));
+                newAsm.Write(outputPath);
+                newAsm.Dispose();
+
+                Console.WriteLine($"  {fileName}: {typesToForward.Count} type-forwards → netstandard");
+                totalRedirected += typesToForward.Count;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  WARN: {fileName}: {ex.Message}");
+            }
+        }
+
+        Console.WriteLine($"Total: {totalRedirected} type-forwards created in {forwardDir}/");
+
+        // Also create a forwarding System.Drawing.Common.dll that forwards to System.Drawing
+        // (AL code declares types under assembly("System.Drawing.Common") but the merged
+        // assembly is System.Drawing-merged.dll deployed as System.Drawing.dll)
+        CreateDrawingCommonForwarder(forwardDir);
+    }
+
+    static void CreateDrawingCommonForwarder(string outputDir)
+    {
+        var drawingMergedPath = Path.Combine(PatchedDir, "System.Drawing-merged.dll");
+        if (!File.Exists(drawingMergedPath)) return;
+
+        // Find the original System.Drawing.Common.dll to get its assembly identity
+        var drawingCommonPaths = new[]
+        {
+            Path.Combine(ServiceTierDir, "System.Drawing.Common.dll"),
+            Path.Combine(RefAsmDir, "System.Drawing.Common.dll"),
+        };
+        string? srcPath = drawingCommonPaths.FirstOrDefault(File.Exists);
+        if (srcPath == null)
+        {
+            Console.WriteLine("  WARN: System.Drawing.Common.dll not found, skipping forwarder");
+            return;
+        }
+
+        using var srcAsm = AssemblyDefinition.ReadAssembly(srcPath, new ReaderParameters { ReadSymbols = false });
+        using var drawingAsm = AssemblyDefinition.ReadAssembly(drawingMergedPath, new ReaderParameters { ReadSymbols = false });
+
+        // Collect types from the merged System.Drawing assembly
+        var drawingTypes = new HashSet<string>();
+        CollectTypeNames(drawingAsm.MainModule.Types, drawingTypes);
+
+        // Create forwarding assembly
+        var newAsm = AssemblyDefinition.CreateAssembly(srcAsm.Name, srcAsm.Name.Name, ModuleKind.Dll);
+        var module = newAsm.MainModule;
+
+        // Add System.Drawing assembly reference (the merged one)
+        var drawingRef = new AssemblyNameReference("System.Drawing", drawingAsm.Name.Version)
+        {
+            PublicKeyToken = drawingAsm.Name.PublicKeyToken
+        };
+        module.AssemblyReferences.Add(drawingRef);
+
+        // Also add netstandard ref for types from there
+        var mergedPath = Path.Combine(PatchedDir, "netstandard-merged.dll");
+        using var netstdAsm = AssemblyDefinition.ReadAssembly(mergedPath, new ReaderParameters { ReadSymbols = false });
+        var netstdTypes = new HashSet<string>();
+        CollectTypeNames(netstdAsm.MainModule.Types, netstdTypes);
+
+        var netstdRef = new AssemblyNameReference("netstandard", netstdAsm.Name.Version)
+        {
+            PublicKeyToken = netstdAsm.Name.PublicKeyToken
+        };
+        module.AssemblyReferences.Add(netstdRef);
+
+        int count = 0;
+        foreach (var type in srcAsm.MainModule.Types)
+        {
+            if (type.Name == "<Module>") continue;
+
+            // Determine target: prefer System.Drawing-merged, fallback to netstandard
+            IMetadataScope targetRef;
+            if (drawingTypes.Contains(type.FullName))
+                targetRef = drawingRef;
+            else if (netstdTypes.Contains(type.FullName))
+                targetRef = netstdRef;
+            else
+                continue;
+
+            var exported = new ExportedType(type.Namespace, type.Name, module, targetRef)
+            { Attributes = TypeAttributes.Forwarder };
+            module.ExportedTypes.Add(exported);
+            count++;
+        }
+
+        // Also forward types that are ExportedTypes in the source
+        foreach (var et in srcAsm.MainModule.ExportedTypes)
+        {
+            if (et.DeclaringType != null) continue;
+            var fullName = string.IsNullOrEmpty(et.Namespace) ? et.Name : et.Namespace + "." + et.Name;
+
+            IMetadataScope targetRef;
+            if (drawingTypes.Contains(fullName))
+                targetRef = drawingRef;
+            else if (netstdTypes.Contains(fullName))
+                targetRef = netstdRef;
+            else
+                continue;
+
+            var exported = new ExportedType(et.Namespace, et.Name, module, targetRef)
+            { Attributes = TypeAttributes.Forwarder };
+            module.ExportedTypes.Add(exported);
+            count++;
+        }
+
+        var outPath = Path.Combine(outputDir, "System.Drawing.Common.dll");
+        newAsm.Write(outPath);
+        newAsm.Dispose();
+        Console.WriteLine($"  System.Drawing.Common: {count} type-forwards → System.Drawing/netstandard");
+    }
+
+    static void CollectTypeNames(IEnumerable<TypeDefinition> types, HashSet<string> names)
+    {
+        foreach (var type in types)
+        {
+            if (type.Name == "<Module>") continue;
+            names.Add(type.FullName);
+        }
     }
 
     static void MergeAssembly(string sourcePath, string outputPath, string[]? extraSearchDirs)
@@ -448,9 +652,101 @@ class Program
         }
     }
 
+    // =========================================================================
+    // Type remapping: ensures all type references point to local TypeDefinitions
+    // in the merged assembly (not cross-assembly references), and generic
+    // parameters are correctly remapped to the target type/method.
+    // =========================================================================
+
+    /// <summary>
+    /// Find a TypeDefinition in the target module by namespace+name, including nested types.
+    /// </summary>
+    static TypeDefinition? FindLocalType(ModuleDefinition module, TypeReference typeRef)
+    {
+        if (typeRef is TypeDefinition td && td.Module == module)
+            return td;
+
+        // Handle nested types
+        if (typeRef.DeclaringType != null)
+        {
+            var parent = FindLocalType(module, typeRef.DeclaringType);
+            if (parent != null)
+                return parent.NestedTypes.FirstOrDefault(t => t.Name == typeRef.Name);
+            return null;
+        }
+
+        return module.Types.FirstOrDefault(t =>
+            t.Name == typeRef.Name && t.Namespace == typeRef.Namespace);
+    }
+
+    /// <summary>
+    /// Remap a type reference to use local TypeDefinitions and correct generic parameters.
+    /// This is the core fix: instead of ImportReference (which creates cross-assembly refs),
+    /// we resolve to local types in the merged assembly wherever possible.
+    /// </summary>
+    static TypeReference RemapType(TypeReference typeRef, ModuleDefinition targetModule,
+        IGenericParameterProvider? targetTypeProvider, IGenericParameterProvider? targetMethodProvider)
+    {
+        if (typeRef == null)
+            return targetModule.TypeSystem.Object;
+
+        // Generic parameter: remap to target's generic parameter by position
+        if (typeRef is GenericParameter gp)
+        {
+            if (gp.Type == GenericParameterType.Type && targetTypeProvider != null
+                && gp.Position < targetTypeProvider.GenericParameters.Count)
+                return targetTypeProvider.GenericParameters[gp.Position];
+            if (gp.Type == GenericParameterType.Method && targetMethodProvider != null
+                && gp.Position < targetMethodProvider.GenericParameters.Count)
+                return targetMethodProvider.GenericParameters[gp.Position];
+            // Fallback: try to import
+            return targetModule.ImportReference(typeRef);
+        }
+
+        // Generic instance: remap element type and all generic arguments
+        if (typeRef is GenericInstanceType git)
+        {
+            var elementType = RemapType(git.ElementType, targetModule, targetTypeProvider, targetMethodProvider);
+            var result = new GenericInstanceType(elementType);
+            foreach (var arg in git.GenericArguments)
+                result.GenericArguments.Add(RemapType(arg, targetModule, targetTypeProvider, targetMethodProvider));
+            return result;
+        }
+
+        // Array type
+        if (typeRef is ArrayType at)
+        {
+            var elementType = RemapType(at.ElementType, targetModule, targetTypeProvider, targetMethodProvider);
+            return new ArrayType(elementType, at.Rank);
+        }
+
+        // ByReference type
+        if (typeRef is ByReferenceType brt)
+        {
+            var elementType = RemapType(brt.ElementType, targetModule, targetTypeProvider, targetMethodProvider);
+            return new ByReferenceType(elementType);
+        }
+
+        // Pointer type
+        if (typeRef is PointerType pt)
+        {
+            var elementType = RemapType(pt.ElementType, targetModule, targetTypeProvider, targetMethodProvider);
+            return new PointerType(elementType);
+        }
+
+        // Regular type: check if it exists locally in the target module
+        var local = FindLocalType(targetModule, typeRef);
+        if (local != null)
+            return local;
+
+        // Not found locally — use ImportReference
+        return targetModule.ImportReference(typeRef);
+    }
+
     /// <summary>
     /// Copy a type definition as a stub into the target module.
     /// Methods get empty/throw bodies; fields, properties, events are copied.
+    /// All type references are remapped to use local TypeDefinitions.
     /// </summary>
     static TypeDefinition CopyTypeStub(ModuleDefinition targetModule, TypeDefinition srcType, TypeDefinition? declaringType)
     {
@@ -474,14 +770,15 @@ class Program
             srcType.Name,
             srcType.Attributes);
 
-        // Base type
+        // Generic parameters (must be added BEFORE remapping other types)
+        CopyGenericParameters(srcType, newType, targetModule);
+
+        // Base type (remap to local if possible)
         if (srcType.BaseType != null)
         {
-            newType.BaseType = targetModule.ImportReference(srcType.BaseType);
+            try { newType.BaseType = RemapType(srcType.BaseType, targetModule, newType, null); }
+            catch { newType.BaseType = targetModule.TypeSystem.Object; }
         }
-
-        // Generic parameters
-        CopyGenericParameters(srcType, newType, targetModule);
 
         // Interfaces
         foreach (var iface in srcType.Interfaces)
@@ -489,10 +786,16 @@ class Program
             try
             {
                 newType.Interfaces.Add(new InterfaceImplementation(
-                    targetModule.ImportReference(iface.InterfaceType)));
+                    RemapType(iface.InterfaceType, targetModule, newType, null)));
             }
             catch { /* skip problematic interfaces */ }
         }
+
+        // Add to module EARLY so nested types and later lookups can find this type
+        if (declaringType == null)
+            targetModule.Types.Add(newType);
+        else
+            declaringType.NestedTypes.Add(newType);
 
         // Fields (public only for non-enum, all for enum)
         foreach (var field in srcType.Fields)
@@ -503,14 +806,17 @@ class Program
             try
             {
                 var newField = new FieldDefinition(field.Name, field.Attributes,
-                    targetModule.ImportReference(field.FieldType));
+                    RemapType(field.FieldType, targetModule, newType, null));
                 if (field.HasConstant)
                     newField.Constant = field.Constant;
                 if (field.InitialValue != null && field.InitialValue.Length > 0)
                     newField.InitialValue = field.InitialValue;
                 newType.Fields.Add(newField);
             }
-            catch { /* skip problematic fields */ }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"    WARN: field {srcType.FullName}.{field.Name}: {ex.Message}");
+            }
         }
 
         // Methods (public/protected only)
@@ -522,14 +828,17 @@ class Program
             try
             {
                 var newMethod = new MethodDefinition(method.Name, method.Attributes,
-                    targetModule.ImportReference(method.ReturnType));
+                    targetModule.TypeSystem.Void); // placeholder, set after generic params
 
                 CopyGenericParameters(method, newMethod, targetModule);
+
+                // Now set return type with proper remapping (method generic params available)
+                newMethod.ReturnType = RemapType(method.ReturnType, targetModule, newType, newMethod);
 
                 foreach (var param in method.Parameters)
                 {
                     var newParam = new ParameterDefinition(param.Name, param.Attributes,
-                        targetModule.ImportReference(param.ParameterType));
+                        RemapType(param.ParameterType, targetModule, newType, newMethod));
                     if (param.HasConstant)
                         newParam.Constant = param.Constant;
                     newMethod.Parameters.Add(newParam);
@@ -546,7 +855,10 @@ class Program
 
                 newType.Methods.Add(newMethod);
             }
-            catch { /* skip problematic methods */ }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"    WARN: method {srcType.FullName}.{method.Name}: {ex.Message}");
+            }
         }
 
         // Properties (public only)
@@ -561,19 +873,22 @@ class Program
             try
             {
                 var newProp = new PropertyDefinition(prop.Name, prop.Attributes,
-                    targetModule.ImportReference(prop.PropertyType));
+                    RemapType(prop.PropertyType, targetModule, newType, null));
                 if (prop.HasConstant)
                     newProp.Constant = prop.Constant;
 
-                // Link to the copied methods
+                // Link to the copied methods (match by name + parameter count + param types)
                 if (getter != null)
-                    newProp.GetMethod = newType.Methods.FirstOrDefault(m => m.Name == getter.Name);
+                    newProp.GetMethod = FindMatchingMethod(newType, getter);
                 if (setter != null)
-                    newProp.SetMethod = newType.Methods.FirstOrDefault(m => m.Name == setter.Name);
+                    newProp.SetMethod = FindMatchingMethod(newType, setter);
 
                 newType.Properties.Add(newProp);
             }
-            catch { /* skip problematic properties */ }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"    WARN: prop {srcType.FullName}.{prop.Name}: {ex.Message}");
+            }
         }
 
         // Events (public only)
@@ -588,7 +903,7 @@ class Program
             try
             {
                 var newEvt = new EventDefinition(evt.Name, evt.Attributes,
-                    targetModule.ImportReference(evt.EventType));
+                    RemapType(evt.EventType, targetModule, newType, null));
                 if (add != null)
                     newEvt.AddMethod = newType.Methods.FirstOrDefault(m => m.Name == add.Name);
                 if (remove != null)
@@ -598,25 +913,7 @@ class Program
             catch { /* skip problematic events */ }
         }
 
-        // Custom attributes on the type
-        foreach (var attr in srcType.CustomAttributes)
-        {
-            try
-            {
-                var newAttr = new CustomAttribute(targetModule.ImportReference(attr.Constructor));
-                foreach (var arg in attr.ConstructorArguments)
-                    newAttr.ConstructorArguments.Add(new CustomAttributeArgument(
-                        targetModule.ImportReference(arg.Type), arg.Value));
-                newType.CustomAttributes.Add(newAttr);
-            }
-            catch { /* skip problematic attributes */ }
-        }
-
-        // Add to module or declaring type
-        if (declaringType == null)
-            targetModule.Types.Add(newType);
-        else
-            declaringType.NestedTypes.Add(newType);
+        // Custom attributes on the type (skip — they're not needed for compilation)
 
         // Nested types (recursive) - copy ALL public/protected nested types
         foreach (var nested in srcType.NestedTypes)
@@ -650,7 +947,7 @@ class Program
             attrs = srcType.Attributes;
             if (srcType.BaseType != null)
             {
-                try { baseType = targetModule.ImportReference(srcType.BaseType); }
+                try { baseType = RemapType(srcType.BaseType, targetModule, null, null); }
                 catch { }
             }
             if (srcType.IsInterface)
@@ -664,6 +961,34 @@ class Program
 
         targetModule.Types.Add(newType);
         return newType;
+    }
+
+    /// <summary>
+    /// Find a method in the target type that matches the source method by name,
+    /// parameter count, AND parameter type names. Needed for indexer overloads
+    /// like DataRow.Item[string] vs DataRow.Item[DataColumn].
+    /// </summary>
+    static MethodDefinition? FindMatchingMethod(TypeDefinition targetType, MethodDefinition srcMethod)
+    {
+        // First try exact match by name + param count + param type names
+        foreach (var m in targetType.Methods)
+        {
+            if (m.Name != srcMethod.Name || m.Parameters.Count != srcMethod.Parameters.Count)
+                continue;
+            bool match = true;
+            for (int i = 0; i < m.Parameters.Count; i++)
+            {
+                if (m.Parameters[i].ParameterType.FullName != srcMethod.Parameters[i].ParameterType.FullName)
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return m;
+        }
+        // Fallback: match by name + param count only
+        return targetType.Methods.FirstOrDefault(m =>
+            m.Name == srcMethod.Name && m.Parameters.Count == srcMethod.Parameters.Count);
     }
 
     static void CopyGenericParameters(IGenericParameterProvider source, IGenericParameterProvider target, ModuleDefinition module)
@@ -680,7 +1005,7 @@ class Program
                 try
                 {
                     newGp.Constraints.Add(new GenericParameterConstraint(
-                        module.ImportReference(constraint.ConstraintType)));
+                        RemapType(constraint.ConstraintType, module, target, null)));
                 }
                 catch { /* skip problematic constraints */ }
             }
