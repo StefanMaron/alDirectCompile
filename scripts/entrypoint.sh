@@ -75,19 +75,6 @@ if [ ! -f "$SERVICE_DIR/Microsoft.Dynamics.Nav.Server.dll" ]; then
     [ -z "$NAV_DIR" ] && NAV_DIR="${MAJOR_VERSION}0"
     mkdir -p "/usr/share/Microsoft/Microsoft Dynamics NAV/$NAV_DIR/Server"
 
-    # Override framework DLLs
-    cp /bc/hook/System.Security.Principal.Windows.dll /usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.*/
-    cp /bc/hook/Microsoft.AspNetCore.Server.HttpSys.dll /usr/share/dotnet/shared/Microsoft.AspNetCore.App/8.0.*/
-
-    # Replace stub DLLs in service dir (Geneva, SqlClient, etc.)
-    for stub in OpenTelemetry.Exporter.Geneva.dll Microsoft.Data.SqlClient.dll; do
-        if [ -f "/bc/hook/$stub" ]; then
-            [ -f "$SERVICE_DIR/$stub" ] && [ ! -f "$SERVICE_DIR/${stub}.orig" ] && cp "$SERVICE_DIR/$stub" "$SERVICE_DIR/${stub}.orig"
-            cp "/bc/hook/$stub" "$SERVICE_DIR/$stub"
-            echo "[entrypoint] Replaced $stub with stub/unix version"
-        fi
-    done
-
     # Patch CustomSettings.config
     CONFIG="$SERVICE_DIR/CustomSettings.config"
     sed -i \
@@ -120,6 +107,18 @@ else
     echo "[entrypoint] Service tier already set up."
 fi
 
+# Override framework DLLs (must run every container start, not just first setup)
+cp /bc/hook/System.Security.Principal.Windows.dll /usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.*/
+cp /bc/hook/Microsoft.AspNetCore.Server.HttpSys.dll /usr/share/dotnet/shared/Microsoft.AspNetCore.App/8.0.*/
+# Replace stub DLLs in service dir
+for stub in OpenTelemetry.Exporter.Geneva.dll Microsoft.Data.SqlClient.dll; do
+    if [ -f "/bc/hook/$stub" ]; then
+        [ -f "$SERVICE_DIR/$stub" ] && [ ! -f "$SERVICE_DIR/${stub}.orig" ] && cp "$SERVICE_DIR/$stub" "$SERVICE_DIR/${stub}.orig"
+        cp "/bc/hook/$stub" "$SERVICE_DIR/$stub"
+        echo "[entrypoint] Replaced $stub with stub/unix version"
+    fi
+done
+
 # Apply patched DLLs (Cecil-modified to fix Linux-specific bugs)
 # Patch #14: CodeAnalysis.dll — fix IsTypeForwardingCircular NullRef on Linux
 #   BC's Cecil type loader crashes following type-forwarding chains in netstandard.dll.
@@ -151,6 +150,7 @@ if [ ! -f "$ADDINS_DIR/System.Runtime.dll" ] && [ -d /bc/refasm ]; then
     cp /bc/refasm/*.dll "$ADDINS_DIR/" 2>/dev/null || true
     echo "[entrypoint] Copied .NET reference assemblies to Add-Ins ($(ls /bc/refasm/*.dll | wc -l) files)"
 fi
+
 
 # =============================================================================
 # Step 3: Wait for SQL Server and set up database
@@ -314,8 +314,23 @@ exec 3>/tmp/bc-stdin
         if [ "$HTTP" != "000" ]; then
             break
         fi
-        sleep 2
     done
+
+    # Patch #15: After BC has loaded all runtime DLLs into memory, rename them so
+    # Cecil's probing paths can't find them. This forces all assembly resolution
+    # to use our managed reference assemblies from Add-Ins.
+    RUNTIME_DIR="/usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.25"
+    if [ -d "$RUNTIME_DIR" ] && [ -d "$ADDINS_DIR" ]; then
+        RENAMED=0
+        for refasm in "$ADDINS_DIR"/*.dll; do
+            fname=$(basename "$refasm")
+            if [ -f "$RUNTIME_DIR/$fname" ] && [ ! -f "$RUNTIME_DIR/${fname}.bak" ]; then
+                mv "$RUNTIME_DIR/$fname" "$RUNTIME_DIR/${fname}.bak"
+                RENAMED=$((RENAMED + 1))
+            fi
+        done
+        echo "[entrypoint] Patch #15: Renamed $RENAMED runtime DLLs to .bak (after BC loaded them)"
+    fi
 
     if [ -f /bc/testrunner/TestRunner.app ]; then
         echo "[entrypoint] Publishing Test Runner Extension..."

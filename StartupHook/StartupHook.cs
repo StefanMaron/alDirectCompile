@@ -195,6 +195,15 @@ internal class StartupHook
             PatchNavTypes(args.LoadedAssembly);
         }
 
+        // Patch #15: Remove .NET runtime directory from server-side compiler's assembly probing.
+        // On Linux, Cecil can't read R2R/native DLLs from /usr/share/dotnet/shared/, and even
+        // managed runtime DLLs forward types to System.Private.CoreLib (R2R, unreadable).
+        // Our reference assemblies in Add-Ins define types directly — they just need to be found first.
+        if (name == "Microsoft.Dynamics.Nav.Ncl")
+        {
+            PatchAssemblyProbing(args.LoadedAssembly);
+        }
+
     }
 
     private static void TryEagerPatch()
@@ -485,7 +494,11 @@ internal class StartupHook
         }
     }
 
-    private static bool IsTypeForwardingCircularNoop() => false;
+    private static bool IsTypeForwardingCircularNoop()
+    {
+        try { File.AppendAllText("/tmp/is-circular-called.txt", $"{DateTime.UtcNow}\n"); } catch { }
+        return false;
+    }
     private static void CheckFileNameNoop() { } // Allow empty paths — caller handles null results
 
     private static void PatchCecilCheckFileName(Assembly cecilAsm)
@@ -512,6 +525,404 @@ internal class StartupHook
         }
     }
 
+
+    // ========================================================================
+    // Patch #15: Remove .NET runtime directory from assembly probing paths.
+    //
+    // Problem: Server-side AL compiler uses Mono.Cecil to resolve .NET types through
+    // netstandard type-forwarding chains. On Linux, the forwarded-to assemblies
+    // (System.Collections, System.Runtime, etc.) exist in TWO places:
+    //   1. Add-Ins/ — our managed reference assemblies (have actual type definitions) ✅
+    //   2. /usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.x/ — runtime DLLs ❌
+    //
+    // Runtime DLLs are either R2R (unreadable by Cecil) or forward types to
+    // System.Private.CoreLib (also R2R). Reference assemblies define types directly.
+    //
+    // Fix: Hook two methods to exclude the runtime directory from Cecil's search:
+    //   A. GetGlobalAssemblyCacheDirectories → empty (removes runtime dir from probing paths)
+    //   B. GetLocationOfAssembliesLoadedInServerAppDomain → filtered (removes runtime paths
+    //      from well-known assemblies so they don't short-circuit probing path search)
+    // ========================================================================
+
+    private static void PatchAssemblyProbing(Assembly navNclAsm)
+    {
+        try
+        {
+            // Hook B: Filter well-known assemblies in NavAppCompilationAssemblyLocator
+            var locatorType = navNclAsm.GetType(
+                "Microsoft.Dynamics.Nav.Runtime.Apps.NavAppCompilationAssemblyLocator");
+            if (locatorType == null)
+            {
+                Console.WriteLine("[StartupHook] NavAppCompilationAssemblyLocator not found");
+                return;
+            }
+
+            var getLocations = locatorType.GetMethod("GetLocationOfAssembliesLoadedInServerAppDomain",
+                BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+            if (getLocations != null)
+            {
+                var replacement = typeof(StartupHook).GetMethod(
+                    nameof(FilteredAssemblyLocations),
+                    BindingFlags.Static | BindingFlags.NonPublic);
+                ApplyJmpHook(getLocations, replacement!, "NavAppCompilationAssemblyLocator.GetLocationOfAssembliesLoadedInServerAppDomain");
+            }
+            else
+            {
+                Console.WriteLine("[StartupHook] GetLocationOfAssembliesLoadedInServerAppDomain not found");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Patch #15 (assembly probing) failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Replacement for GetLocationOfAssembliesLoadedInServerAppDomain.
+    /// Returns all loaded assemblies EXCEPT those from the .NET shared runtime directory.
+    /// This forces the compiler's Cecil resolver to find .NET types through the probing
+    /// paths (Add-Ins first), where our managed reference assemblies have full type definitions.
+    /// </summary>
+    private static System.Collections.Generic.Dictionary<string, string> FilteredAssemblyLocations()
+    {
+        // Write marker file so we can verify hook fires even if Console.WriteLine is lost
+        try { File.WriteAllText("/tmp/patch15-wellknown-hook-fired.txt",
+            $"FilteredAssemblyLocations called at {DateTime.UtcNow}\n"); } catch { }
+
+        var dict = new System.Collections.Generic.Dictionary<string, string>();
+        int skipped = 0;
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            try
+            {
+                if (asm.IsDynamic) continue;
+                var loc = asm.Location;
+                if (string.IsNullOrEmpty(loc)) continue;
+                // Skip .NET runtime assemblies — they're R2R or forward to R2R CoreLib
+                if (loc.Contains("/dotnet/shared/Microsoft.NETCore.App/"))
+                {
+                    skipped++;
+                    continue;
+                }
+                if (loc.Contains("/dotnet/shared/Microsoft.AspNetCore.App/"))
+                {
+                    skipped++;
+                    continue;
+                }
+                var name = asm.GetName().Name;
+                if (name != null && !dict.ContainsKey(name))
+                    dict[name] = loc;
+            }
+            catch { }
+        }
+        Console.Error.WriteLine($"[StartupHook] Patch #15b: Well-known assemblies filtered ({dict.Count} kept, {skipped} runtime excluded)");
+        try { File.AppendAllText("/tmp/patch15-wellknown-hook-fired.txt",
+            $"Kept={dict.Count}, Skipped={skipped}\n"); } catch { }
+
+        // Diagnostic: check the static pathNameToAssemblyNameMap cache to see what
+        // assemblies the locator has found, and test Cecil resolution
+        try
+        {
+            var sb2 = new System.Text.StringBuilder();
+            // Access AssemblyLocatorBase's static cache via reflection
+            // Check ALL instances of CodeAnalysis.dll and schedule a delayed check
+            var codeAnalysisAsms = AppDomain.CurrentDomain.GetAssemblies()
+                .Where(a => a.GetName().Name == "Microsoft.Dynamics.Nav.CodeAnalysis").ToArray();
+
+            // Delayed diagnostic: test the actual locator via reflection
+            System.Threading.ThreadPool.QueueUserWorkItem(_ => {
+                System.Threading.Thread.Sleep(15000); // Wait 15s for BC to stabilize
+                try {
+                    var sb4 = new System.Text.StringBuilder();
+                    sb4.AppendLine($"Locator diag at {DateTime.UtcNow}");
+                    var navNcl = AppDomain.CurrentDomain.GetAssemblies()
+                        .FirstOrDefault(a => a.GetName().Name == "Microsoft.Dynamics.Nav.Ncl");
+                    sb4.AppendLine($"Nav.Ncl: {(navNcl != null ? "loaded" : "NOT loaded")}");
+                    if (navNcl != null) {
+                        var navGlobalType = navNcl.GetType("Microsoft.Dynamics.Nav.Runtime.NavGlobal");
+                        sb4.AppendLine($"NavGlobal: {(navGlobalType != null ? "found" : "NOT found")}");
+                        if (navGlobalType != null) {
+                            var stProp = navGlobalType.GetProperty("SystemTenant",
+                                BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                            var st = stProp?.GetValue(null);
+                            sb4.AppendLine($"SystemTenant: {(st != null ? st.GetType().Name : "null")}");
+                            if (st != null) {
+                                var f = st.GetType().GetField("lazyDotNetResolverFactory",
+                                    BindingFlags.Instance | BindingFlags.NonPublic);
+                                sb4.AppendLine($"lazyFactory field: {(f != null ? "found" : "NOT found")}");
+                                if (f != null) {
+                                    var lazy = f.GetValue(st);
+                                    var vp = lazy?.GetType().GetProperty("Value");
+                                    var factory = vp?.GetValue(lazy);
+                                    sb4.AppendLine($"Factory: {(factory != null ? factory.GetType().FullName : "null")}");
+                                    if (factory != null) {
+                                        var tlf = factory.GetType().GetField("cachedTypeLoader",
+                                            BindingFlags.Instance | BindingFlags.NonPublic);
+                                        var tl = tlf?.GetValue(factory);
+                                        sb4.AppendLine($"TypeLoader: {(tl != null ? tl.GetType().FullName : "null")}");
+                                        if (tl != null) {
+                                            var lp = tl.GetType().GetProperty("AssemblyLocator");
+                                            var loc = lp?.GetValue(tl);
+                                            sb4.AppendLine($"Locator: {(loc != null ? loc.GetType().FullName : "null")}");
+                                            if (loc != null) {
+                                                var pp = loc.GetType().GetProperty("ProbingPaths");
+                                                var paths = pp?.GetValue(loc) as System.Collections.IEnumerable;
+                                                if (paths != null)
+                                                    foreach (var p in paths) sb4.AppendLine($"  Path: {p}");
+                                                var gp = loc.GetType().GetMethod("GetPathToAssembly");
+                                                if (gp != null) {
+                                                    try {
+                                                        var r = gp.Invoke(loc, new object[] { "System.Runtime, Version=8.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a" });
+                                                        sb4.AppendLine($"System.Runtime path: {r ?? "NULL"}");
+                                                    } catch (Exception gex) { sb4.AppendLine($"GetPath error: {gex.InnerException?.Message ?? gex.Message}"); }
+                                                    try {
+                                                        var r2 = gp.Invoke(loc, new object[] { "netstandard, Version=2.1.0.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51" });
+                                                        sb4.AppendLine($"netstandard path: {r2 ?? "NULL"}");
+                                                    } catch (Exception gex) { sb4.AppendLine($"GetPath error: {gex.InnerException?.Message ?? gex.Message}"); }
+                                                }
+
+                                                // Test LoadAssembly and LoadType on the type loader
+                                                var loadAsm = tl.GetType().GetMethod("LoadAssembly");
+                                                var loadType = tl.GetType().GetMethod("LoadType");
+                                                if (loadAsm != null) {
+                                                    try {
+                                                        var netstdInfo = loadAsm.Invoke(tl, new object[] { "netstandard, Version=2.1.0.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51" });
+                                                        sb4.AppendLine($"LoadAssembly(netstandard): {(netstdInfo != null ? netstdInfo.GetType().Name + " Location=" + netstdInfo.GetType().GetProperty("Location")?.GetValue(netstdInfo) : "NULL")}");
+                                                        if (netstdInfo != null && loadType != null) {
+                                                            try {
+                                                                var typeInfo = loadType.Invoke(tl, new object[] { netstdInfo, "System.String" });
+                                                                sb4.AppendLine($"LoadType(netstandard, System.String): {(typeInfo != null ? "FOUND!" : "NULL")}");
+                                                            } catch (Exception ltex) { sb4.AppendLine($"LoadType error: {ltex.InnerException?.Message ?? ltex.Message}"); }
+                                                        }
+                                                        var sysRtInfo = loadAsm.Invoke(tl, new object[] { "System.Runtime, Version=8.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a" });
+                                                        sb4.AppendLine($"LoadAssembly(System.Runtime): {(sysRtInfo != null ? "OK Location=" + sysRtInfo.GetType().GetProperty("Location")?.GetValue(sysRtInfo) : "NULL")}");
+                                                        // Test LoadType from System.Runtime directly
+                                                        if (sysRtInfo != null && loadType != null) {
+                                                            try {
+                                                                var ti = loadType.Invoke(tl, new object[] { sysRtInfo, "System.String" });
+                                                                sb4.AppendLine($"LoadType(System.Runtime, System.String): {(ti != null ? "FOUND!" : "NULL")}");
+                                                            } catch (Exception ex2) { sb4.AppendLine($"LoadType(SysRt) error: {ex2.InnerException?.Message ?? ex2.Message}"); }
+                                                        }
+                                                        // Test: get the loaded AssemblyDefinition and check ExportedTypes
+                                                        var loadFileMethod = tl.GetType().GetMethod("LoadAssemblyFromFile",
+                                                            BindingFlags.Instance | BindingFlags.NonPublic);
+                                                        if (loadFileMethod != null && netstdInfo != null) {
+                                                            try {
+                                                                string netstdLoc = (string)netstdInfo.GetType().GetProperty("Location").GetValue(netstdInfo);
+                                                                dynamic asmDef = loadFileMethod.Invoke(tl, new object[] { netstdLoc });
+                                                                if (asmDef != null) {
+                                                                    var mod = asmDef.MainModule;
+                                                                    var getTypeResult = mod.GetType("System.String", true);
+                                                                    sb4.AppendLine($"Cecil GetType(System.String): {(getTypeResult != null ? $"Name={getTypeResult.Name} FullName={getTypeResult.FullName}" : "NULL")}");
+                                                                    int etCount = 0;
+                                                                    string stringForward = null;
+                                                                    try {
+                                                                        foreach (var et in mod.ExportedTypes) {
+                                                                            etCount++;
+                                                                            if (et.FullName == "System.String")
+                                                                                stringForward = $"IsForwarder={et.IsForwarder} Scope={et.Scope}";
+                                                                        }
+                                                                    } catch (Exception etEx) {
+                                                                        sb4.AppendLine($"ExportedTypes iteration FAILED: {etEx.GetType().Name}: {etEx.Message}");
+                                                                    }
+                                                                    sb4.AppendLine($"ExportedTypes count: {etCount}");
+                                                                    sb4.AppendLine($"System.String forward: {stringForward ?? "NOT FOUND"}");
+                                                                } else sb4.AppendLine("LoadAssemblyFromFile(netstandard) returned NULL");
+                                                            } catch (Exception lfEx) { sb4.AppendLine($"LoadAssemblyFromFile error: {lfEx.InnerException?.Message ?? lfEx.Message}"); }
+                                                        }
+                                                        // Check typeCaches for null entries
+                                                        var typeCacheField = tl.GetType().GetField("typeCache",
+                                                            BindingFlags.Instance | BindingFlags.NonPublic);
+                                                        if (typeCacheField != null) {
+                                                            var tc = typeCacheField.GetValue(tl) as System.Collections.ICollection;
+                                                            int nullCount = 0, totalCount = tc?.Count ?? 0;
+                                                            if (tc != null) {
+                                                                foreach (dynamic kvp in (System.Collections.IEnumerable)tc) {
+                                                                    if (kvp.Value == null) {
+                                                                        nullCount++;
+                                                                        string k = kvp.Key;
+                                                                        if (k.Contains("String") || k.Contains("Object"))
+                                                                            sb4.AppendLine($"  NULL cached: {k}");
+                                                                    }
+                                                                }
+                                                            }
+                                                            sb4.AppendLine($"typeCache: {totalCount} total, {nullCount} null");
+                                                        }
+                                                        var asmCacheField = tl.GetType().GetField("assemblyInfoCache",
+                                                            BindingFlags.Instance | BindingFlags.NonPublic);
+                                                        if (asmCacheField != null) {
+                                                            var ac = asmCacheField.GetValue(tl) as System.Collections.ICollection;
+                                                            int nullAC = 0, totalAC = ac?.Count ?? 0;
+                                                            if (ac != null) {
+                                                                foreach (dynamic kvp in (System.Collections.IEnumerable)ac) {
+                                                                    if (kvp.Value == null) {
+                                                                        nullAC++;
+                                                                        sb4.AppendLine($"  NULL asm: {(string)kvp.Key}");
+                                                                    }
+                                                                }
+                                                            }
+                                                            sb4.AppendLine($"assemblyInfoCache: {totalAC} total, {nullAC} null");
+                                                        }
+                                                    } catch (Exception laex) { sb4.AppendLine($"LoadAssembly error: {laex.InnerException?.Message ?? laex.Message}"); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    File.WriteAllText("/tmp/patch15-locator-diag.txt", sb4.ToString());
+                } catch (Exception ex) {
+                    File.WriteAllText("/tmp/patch15-locator-diag.txt", $"Error: {ex}");
+                }
+            });
+
+            // Also keep the delayed cache check
+            new System.Threading.Timer(_ => {
+                try {
+                    var sb3 = new System.Text.StringBuilder();
+                    sb3.AppendLine($"Delayed cache check at {DateTime.UtcNow}");
+                    var allCAs = AppDomain.CurrentDomain.GetAssemblies()
+                        .Where(a => a.GetName().Name == "Microsoft.Dynamics.Nav.CodeAnalysis").ToArray();
+                    sb3.AppendLine($"CodeAnalysis instances: {allCAs.Length}");
+                    foreach (var ca in allCAs) {
+                        sb3.AppendLine($"  Loc: {ca.Location}, HashCode: {ca.GetHashCode()}");
+                        var lbt = ca.GetTypes().FirstOrDefault(t => t.Name == "AssemblyLocatorBase");
+                        if (lbt != null) {
+                            var cf = lbt.GetField("pathNameToAssemblyNameMap",
+                                BindingFlags.Static | BindingFlags.NonPublic);
+                            if (cf != null) {
+                                var c = cf.GetValue(null);
+                                if (c is System.Collections.ICollection coll2) {
+                                    sb3.AppendLine($"  Cache entries: {coll2.Count}");
+                                    foreach (dynamic kvp in (System.Collections.IEnumerable)c) {
+                                        string k = kvp.Key;
+                                        if (k.Contains("System.Runtime") || k.Contains("netstandard"))
+                                            sb3.AppendLine($"    {k}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    File.WriteAllText("/tmp/patch15-delayed-cache.txt", sb3.ToString());
+                } catch (Exception ex) {
+                    try { File.WriteAllText("/tmp/patch15-delayed-cache.txt", $"Error: {ex}"); } catch {}
+                }
+            }, null, TimeSpan.FromSeconds(30), System.Threading.Timeout.InfiniteTimeSpan);
+            sb2.AppendLine($"CodeAnalysis instances: {codeAnalysisAsms.Length}");
+            foreach (var ca in codeAnalysisAsms)
+            {
+                sb2.AppendLine($"  Instance: {ca.Location} (ALC={AssemblyLoadContext.GetLoadContext(ca)?.Name ?? "default"})");
+                var locatorBaseType = ca.GetTypes()
+                    .FirstOrDefault(t => t.Name == "AssemblyLocatorBase");
+                if (locatorBaseType != null)
+                {
+                    var cacheField = locatorBaseType.GetField("pathNameToAssemblyNameMap",
+                        BindingFlags.Static | BindingFlags.NonPublic);
+                    if (cacheField != null)
+                    {
+                        var cache = cacheField.GetValue(null);
+                        if (cache is System.Collections.ICollection coll)
+                        {
+                            sb2.AppendLine($"  pathNameToAssemblyNameMap: {coll.Count} entries");
+                            int addInsCount = 0, serviceCount = 0, runtimeCount = 0, otherCount = 0;
+                            foreach (dynamic kvp in (System.Collections.IEnumerable)cache)
+                            {
+                                string key = kvp.Key;
+                                if (key.Contains("/Add-Ins/")) addInsCount++;
+                                else if (key.Contains("/bc/service/") && !key.Contains("/Add-Ins/")) serviceCount++;
+                                else if (key.Contains("/dotnet/shared/")) runtimeCount++;
+                                else otherCount++;
+                                if (key.Contains("System.Runtime.dll"))
+                                    sb2.AppendLine($"    System.Runtime: {key} → {kvp.Value}");
+                                if (key.Contains("netstandard.dll"))
+                                    sb2.AppendLine($"    netstandard: {key} → {kvp.Value}");
+                            }
+                            sb2.AppendLine($"    Add-Ins: {addInsCount}, Service: {serviceCount}, Runtime: {runtimeCount}, Other: {otherCount}");
+                        }
+                    }
+                }
+            }
+            File.WriteAllText("/tmp/patch15-cache-diag.txt", sb2.ToString());
+        }
+        catch (Exception cacheEx)
+        {
+            try { File.WriteAllText("/tmp/patch15-cache-diag.txt",
+                $"Cache diagnostic failed: {cacheEx}\n"); } catch { }
+        }
+
+        try
+        {
+            var sb = new System.Text.StringBuilder();
+            string addInsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Add-Ins");
+            string netstdPath = Path.Combine(addInsDir, "netstandard.dll");
+            string sysRuntimePath = Path.Combine(addInsDir, "System.Runtime.dll");
+            sb.AppendLine($"Add-Ins dir: {addInsDir} exists={Directory.Exists(addInsDir)}");
+            sb.AppendLine($"netstandard.dll exists={File.Exists(netstdPath)} size={new FileInfo(netstdPath).Length}");
+            sb.AppendLine($"System.Runtime.dll exists={File.Exists(sysRuntimePath)} size={new FileInfo(sysRuntimePath).Length}");
+
+            // Try reading netstandard with Cecil
+            var cecilAsm = AppDomain.CurrentDomain.GetAssemblies()
+                .FirstOrDefault(a => a.GetName().Name == "Mono.Cecil");
+            if (cecilAsm != null)
+            {
+                var modDefType = cecilAsm.GetType("Mono.Cecil.ModuleDefinition");
+                var readMethod = modDefType?.GetMethod("ReadModule", new[] { typeof(string) });
+                if (readMethod != null)
+                {
+                    // Read netstandard.dll
+                    dynamic netstdMod = readMethod.Invoke(null, new object[] { netstdPath });
+                    var exports = netstdMod.ExportedTypes;
+                    int fwdCount = 0;
+                    string stringFwd = null;
+                    foreach (var et in exports)
+                    {
+                        if (et.IsForwarder)
+                        {
+                            fwdCount++;
+                            string tn = et.FullName;
+                            if (tn == "System.String")
+                            {
+                                stringFwd = $"{et.Scope}";
+                            }
+                        }
+                    }
+                    sb.AppendLine($"netstandard ExportedTypes: {fwdCount} forwarders");
+                    sb.AppendLine($"System.String forwarded to: {stringFwd ?? "NOT FOUND"}");
+                    netstdMod.Dispose();
+
+                    // Read System.Runtime.dll
+                    dynamic sysRtMod = readMethod.Invoke(null, new object[] { sysRuntimePath });
+                    var strType = sysRtMod.GetType("System.String");
+                    sb.AppendLine($"System.Runtime.GetType('System.String'): {(strType != null ? strType.FullName : "NULL")}");
+                    sysRtMod.Dispose();
+                }
+                else sb.AppendLine("ModuleDefinition.ReadModule not found");
+            }
+            else sb.AppendLine("Mono.Cecil assembly not loaded");
+
+            File.WriteAllText("/tmp/patch15-cecil-diag.txt", sb.ToString());
+        }
+        catch (Exception diagEx)
+        {
+            try { File.WriteAllText("/tmp/patch15-cecil-diag.txt",
+                $"Diagnostic failed: {diagEx}\n"); } catch { }
+        }
+        return dict;
+    }
+
+    /// <summary>
+    /// Replacement for NavAutomationHelper.GetGlobalAssemblyCacheDirectories.
+    /// Returns empty — prevents the .NET runtime directory from being added to probing paths.
+    /// </summary>
+    private static System.Collections.Generic.IEnumerable<string> EmptyGlobalAssemblyCacheDirs()
+    {
+        try { File.AppendAllText("/tmp/patch15-gac-hook-fired.txt",
+            $"EmptyGlobalAssemblyCacheDirs called at {DateTime.UtcNow}\n"); } catch { }
+        Console.Error.WriteLine("[StartupHook] Patch #15a: GetGlobalAssemblyCacheDirectories → empty (no runtime dir probing)");
+        return Array.Empty<string>();
+    }
 
     // ========================================================================
     // Hook all Watson entry points to prevent NullRef crash on Linux.
@@ -682,6 +1093,36 @@ internal class StartupHook
 
                     prop.SetValue(null, funcDelegate);
                     Console.WriteLine("[StartupHook] Set encryption provider to pass-through (plain text passwords)");
+                }
+            }
+
+            // Patch #15a: Remove .NET runtime directory from assembly probing paths.
+            // NavAutomationHelper.GetGlobalAssemblyCacheDirectories() adds typeof(object).Assembly.Location
+            // directory (the .NET shared runtime dir) to probing paths. On Linux this contains R2R DLLs
+            // that crash Cecil. Hook it to return empty so only Add-Ins is probed.
+            Type? navAutoHelper = navTypes.GetType("Microsoft.Dynamics.Nav.Types.NavAutomationHelper");
+            if (navAutoHelper != null)
+            {
+                var getGacDirs = navAutoHelper.GetMethod("GetGlobalAssemblyCacheDirectories",
+                    BindingFlags.Static | BindingFlags.Public);
+                if (getGacDirs != null)
+                {
+                    var replacement = typeof(StartupHook).GetMethod(nameof(EmptyGlobalAssemblyCacheDirs),
+                        BindingFlags.Static | BindingFlags.NonPublic);
+                    ApplyJmpHook(getGacDirs, replacement!, "NavAutomationHelper.GetGlobalAssemblyCacheDirectories");
+
+                    // Verify the hook works by calling the method
+                    try
+                    {
+                        var result = getGacDirs.Invoke(null, null);
+                        var dirs = result as System.Collections.Generic.IEnumerable<string>;
+                        int count = dirs != null ? System.Linq.Enumerable.Count(dirs) : -1;
+                        Console.WriteLine($"[StartupHook] GAC dirs hook test: {count} dirs returned (expect 0 if hook works)");
+                    }
+                    catch (Exception testEx)
+                    {
+                        Console.WriteLine($"[StartupHook] GAC dirs hook test failed: {testEx.InnerException?.Message ?? testEx.Message}");
+                    }
                 }
             }
 
@@ -1026,34 +1467,76 @@ internal class StartupHook
         IntPtr origFp = original.MethodHandle.GetFunctionPointer();
         IntPtr replFp = replacement.MethodHandle.GetFunctionPointer();
 
+        // Read precode bytes BEFORE overwriting to find the compiled code address.
+        IntPtr compiledCode = IntPtr.Zero;
+        try
+        {
+            byte[] precodeBytes = new byte[24];
+            Marshal.Copy(origFp, precodeBytes, 0, 24);
+            Console.WriteLine($"[StartupHook]   {name} precode: {BitConverter.ToString(precodeBytes)}");
+
+            // .NET 8 x64 FixupPrecode: 49 BA [8-byte MethodDesc] FF 25 [4-byte disp32]
+            if (precodeBytes[10] == 0xFF && precodeBytes[11] == 0x25)
+            {
+                int disp32 = BitConverter.ToInt32(precodeBytes, 12);
+                IntPtr jmpTargetAddr = origFp + 16 + disp32;
+                compiledCode = Marshal.ReadIntPtr(jmpTargetAddr);
+                Console.WriteLine($"[StartupHook]   {name} compiled code via precode JMP: 0x{compiledCode:X}");
+            }
+
+            // Try StubPrecode format: jmp [rip+disp32] (FF 25) at offset 0
+            if (compiledCode == IntPtr.Zero && precodeBytes[0] == 0xFF && precodeBytes[1] == 0x25)
+            {
+                int disp32 = BitConverter.ToInt32(precodeBytes, 2);
+                IntPtr jmpTargetAddr = origFp + 6 + disp32;
+                compiledCode = Marshal.ReadIntPtr(jmpTargetAddr);
+                Console.WriteLine($"[StartupHook]   {name} compiled code via StubPrecode: 0x{compiledCode:X}");
+            }
+
+            // Try E9 (relative JMP) at offset 0
+            if (compiledCode == IntPtr.Zero && precodeBytes[0] == 0xE9)
+            {
+                int disp32 = BitConverter.ToInt32(precodeBytes, 1);
+                compiledCode = origFp + 5 + disp32;
+                Console.WriteLine($"[StartupHook]   {name} compiled code via E9 JMP: 0x{compiledCode:X}");
+            }
+
+            // MethodDesc approach as fallback
+            if (compiledCode == IntPtr.Zero || compiledCode == origFp)
+            {
+                IntPtr methodDesc = original.MethodHandle.Value;
+                for (int offset = 0; offset <= 16; offset += 8)
+                {
+                    IntPtr ptr = Marshal.ReadIntPtr(methodDesc, offset);
+                    if (ptr != IntPtr.Zero && ptr != origFp && ptr != methodDesc)
+                    {
+                        Console.WriteLine($"[StartupHook]   {name} MethodDesc+{offset}: 0x{ptr:X}");
+                    }
+                }
+                IntPtr codeDataPtr = Marshal.ReadIntPtr(methodDesc, 8);
+                if (codeDataPtr != IntPtr.Zero && codeDataPtr != origFp)
+                    compiledCode = codeDataPtr;
+            }
+        }
+        catch (Exception dbgEx)
+        {
+            Console.WriteLine($"[StartupHook]   precode read failed: {dbgEx.Message}");
+        }
+
         // Patch the precode entry point
         WriteJmp(origFp, replFp, name);
 
-        // On .NET Core, GetFunctionPointer() returns the precode stub, not the compiled code.
-        // The precode is: mov r10, pMethodDesc (10 bytes) + jmp [rip+disp32] (6 bytes)
-        // We need to ALSO patch the compiled code that the precode jumps to,
-        // because JIT-compiled callers may use direct calls past the precode.
-        try
+        // Also patch the compiled code so direct calls from JIT-compiled callers are intercepted
+        if (compiledCode != IntPtr.Zero && compiledCode != origFp && compiledCode != replFp)
         {
-            byte[] precodeBytes = new byte[16];
-            Marshal.Copy(origFp, precodeBytes, 0, 16);
-
-            // Check if we just overwrote a FixupPrecode (our JMP is now there)
-            // Read from backup: the original precode would have been:
-            // 49 BA [8-byte MethodDesc] FF 25 [4-byte disp32]
-            // Since we already patched it, read from the MethodDesc to find compiled code
-            IntPtr methodDesc = original.MethodHandle.Value;
-            // On .NET 8 x64, the compiled code pointer is at MethodDesc + 0x08 (CodeData pointer)
-            // This is runtime-internal but works for .NET 8 on Linux x64
-            IntPtr codeDataPtr = Marshal.ReadIntPtr(methodDesc, 8);
-            if (codeDataPtr != IntPtr.Zero && codeDataPtr != origFp)
+            try
             {
-                WriteJmp(codeDataPtr, replFp, name + " (code)");
+                WriteJmp(compiledCode, replFp, name + " (code)");
             }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[StartupHook]   (compiled code patch skipped: {ex.Message})");
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[StartupHook]   (compiled code patch failed: {ex.Message})");
+            }
         }
     }
 

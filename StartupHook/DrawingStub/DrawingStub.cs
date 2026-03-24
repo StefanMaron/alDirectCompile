@@ -50,6 +50,9 @@ namespace System.Drawing
         public byte G { get; }
         public byte B { get; }
 
+        public bool IsEmpty => A == 0 && R == 0 && G == 0 && B == 0;
+        public string Name => $"{A:X2}{R:X2}{G:X2}{B:X2}";
+
         public static Color Black => new Color();
         public static Color White => new Color();
         public static Color Empty => new Color();
@@ -58,6 +61,19 @@ namespace System.Drawing
         public static Color FromArgb(int alpha, Color baseColor) => new Color();
         public static Color FromArgb(int red, int green, int blue) => new Color();
         public static Color FromArgb(int alpha, int red, int green, int blue) => new Color();
+        public static Color FromName(string name) => new Color();
+
+        public int ToArgb() => (A << 24) | (R << 16) | (G << 8) | B;
+    }
+
+    public static class ColorTranslator
+    {
+        public static Color FromHtml(string htmlColor) => Color.Empty;
+        public static Color FromOle(int oleColor) => Color.Empty;
+        public static Color FromWin32(int win32Color) => Color.Empty;
+        public static string ToHtml(Color c) => string.Empty;
+        public static int ToOle(Color c) => 0;
+        public static int ToWin32(Color c) => 0;
     }
 
     public struct Point
@@ -452,19 +468,23 @@ namespace System.Drawing.Printing
 {
     public enum PaperSourceKind
     {
-        Upper = 1,
-        Lower = 2,
-        Middle = 3,
-        Manual = 4,
-        Envelope = 5,
-        EnvelopeManual = 6,
-        AutomaticFeed = 7,
-        TractorFeed = 8,
-        SmallFormat = 9,
-        LargeFormat = 10,
-        LargeCapacity = 11,
-        Cassette = 14,
-        FormSource = 15,
-        Custom = 257,
+        Upper = 1, Lower = 2, Middle = 3, Manual = 4, Envelope = 5,
+        EnvelopeManual = 6, AutomaticFeed = 7, TractorFeed = 8,
+        SmallFormat = 9, LargeFormat = 10, LargeCapacity = 11,
+        Cassette = 14, FormSource = 15, Custom = 257,
+    }
+
+    public class PrinterSettings
+    {
+        public string PrinterName { get; set; } = "";
+        public bool IsValid => false;
+        public StringCollection InstalledPrinters => new StringCollection();
+
+        public class StringCollection : System.Collections.IEnumerable
+        {
+            public int Count => 0;
+            public string this[int index] => throw new IndexOutOfRangeException();
+            public System.Collections.IEnumerator GetEnumerator() { yield break; }
+        }
     }
 }
