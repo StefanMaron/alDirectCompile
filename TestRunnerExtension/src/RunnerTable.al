@@ -196,31 +196,15 @@ page 50002 "Codeunit Run Requests"
     /// REST API Endpoint:
     /// POST .../codeunitRunRequests(guid'{id}')/Microsoft.NAV.runCodeunit
     ///
-    /// Behavior:
-    /// 1. Validates CodeunitId is set (TestField)
-    /// 2. Prevents concurrent execution (checks for Running status)
-    /// 3. Sets status to Running
-    /// 4. Executes codeunit via Codeunit.Run()
-    /// 5. Updates status to Finished (success) or Error (failure)
-    /// 6. Captures error message in LastResult on failure
-    /// 7. Records execution timestamp in LastExecutionUTC
-    ///
-    /// Error Handling:
-    /// - Throws error if CodeunitId is not set
-    /// - Throws error if already Running
-    /// - Captures GetLastErrorText() on execution failure
-    /// - Updates record even if execution fails
-    ///
-    /// Note: This does NOT use the Test Runner API (codeunit 50199).
-    /// It directly calls Codeunit.Run() for simpler, stateful execution.
+    /// Uses the MS Test Framework (codeunit 130451 - disabled isolation) via
+    /// Test Suite Runner. Creates an AL Test Suite, discovers test methods,
+    /// and runs through the proper test infrastructure with environment reset.
     /// </remarks>
     [ServiceEnabled]
     procedure RunCodeunit(): Boolean
     var
-        TestRunnerAPI: Codeunit "Test Runner API";
-        Log: Record "Log Table";
-        Success: Boolean;
-        FailedTests: Integer;
+        SuiteRunner: Codeunit "Test Suite Runner";
+        ResultText: Text;
     begin
         Rec.TestField(CodeunitId);
         if Rec.Status = Rec.Status::Running then
@@ -229,33 +213,24 @@ page 50002 "Codeunit Run Requests"
         Rec.Status := Rec.Status::Running;
         Rec.Modify(true);
 
-        // Use the Test Runner API to execute the codeunit
         ClearLastError();
         Commit();
 
-        TestRunnerAPI.SetCodeunitId(Rec.CodeunitId);
-        Success := TestRunnerAPI.Run();
+        // Use MS Test Framework via Test Suite Runner
+        SuiteRunner.InitSuite('LINUX');
+        SuiteRunner.AddTestCodeunit(Rec.CodeunitId);
+        ResultText := SuiteRunner.RunSingleCodeunit(Rec.CodeunitId);
 
-        // Check if any individual tests failed
-        Log.SetRange(Success, false);
-        FailedTests := Log.Count();
-
-        if Success and (FailedTests = 0) then begin
+        if ResultText = 'Success' then begin
             Rec.Status := Rec.Status::Finished;
             Rec.LastResult := 'Success';
         end else begin
             Rec.Status := Rec.Status::Error;
-            if FailedTests > 0 then
-                Rec.LastResult := StrSubstNo('%1 test(s) failed - check logs for details', FailedTests)
-            else begin
-                Rec.LastResult := CopyStr(GetLastErrorText(), 1, 250);
-                if Rec.LastResult = '' then
-                    Rec.LastResult := 'Unknown error - check logs for details';
-            end;
+            Rec.LastResult := CopyStr(ResultText, 1, 250);
         end;
 
         Rec.LastExecutionUTC := CurrentDateTime();
         Rec.Modify(true);
-        exit(Success and (FailedTests = 0));
+        exit(Rec.Status = Rec.Status::Finished);
     end;
 }

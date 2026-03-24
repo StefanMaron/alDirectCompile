@@ -287,17 +287,10 @@ fi
 # Sandbox tenant type
 $SQLCMD_DB -Q "UPDATE [\$ndo\$tenantproperty] SET tenanttype = 1 WHERE tenantid = 'default';" 2>/dev/null
 
-# Clear pre-installed apps (allows re-publishing via dev endpoint without dependency conflicts)
-$SQLCMD_DB -Q "
-DELETE FROM [NAV App Installed App];
-DELETE FROM [NAV App Tenant App];
-DELETE FROM [NAV App Dependencies];
-DELETE FROM [NAV App Published App];
-DELETE FROM [Published Application];
-DELETE FROM [Installed Application];
-DELETE FROM [Inplace Installed Application];
-" 2>/dev/null
-echo "[entrypoint] Cleared pre-installed apps (empty slate for test publishing)"
+# Keep pre-installed apps from CRONUS backup (System Application, Base Application, etc.)
+# These cannot be re-published via dev endpoint because ControlAddIn JS resources
+# fail Linux server-side recompilation. Test framework apps are published on top.
+echo "[entrypoint] Keeping pre-installed CRONUS apps (System Application etc.)"
 
 # Admin user (password hash for Admin123! with GUID 00000000-0000-0000-0000-000000000001)
 USER_GUID='00000000-0000-0000-0000-000000000001'
