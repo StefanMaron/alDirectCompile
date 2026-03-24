@@ -63,6 +63,10 @@ namespace System.Drawing
         public Bitmap(Image original) { }
         public Bitmap(Image original, int width, int height) { }
         public void SetResolution(float xDpi, float yDpi) { }
+        public void MakeTransparent() { }
+        public void MakeTransparent(Color transparentColor) { }
+        public Color GetPixel(int x, int y) => Color.Empty;
+        public void SetPixel(int x, int y, Color color) { }
     }
 
     public static class ColorTranslator

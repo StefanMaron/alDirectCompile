@@ -133,6 +133,18 @@ for stub in OpenTelemetry.Exporter.Geneva.dll Microsoft.Data.SqlClient.dll; do
     fi
 done
 
+# Create Win32 DLL symlinks in the service directory and .NET runtime dir.
+# The StartupHook's ResolvingUnmanagedDll only fires on the Default ALC, but
+# compiled AL extensions run in tenant ALCs. Native library search needs symlinks
+# so the .NET loader finds libwin32_stubs.so for user32/kernel32/etc. directly.
+STUB_SO=$(find /bc/hook -name "libwin32_stubs.so" 2>/dev/null | head -1)
+if [ -n "$STUB_SO" ]; then
+    for winlib in user32 kernel32 advapi32 Wintrust wintrust nclcsrts dhcpcsvc Netapi32 netapi32 ntdsapi rpcrt4 httpapi gdiplus; do
+        ln -sf "$STUB_SO" "$SERVICE_DIR/${winlib}.dll" 2>/dev/null
+    done
+    echo "[entrypoint] Created Win32 DLL symlinks → libwin32_stubs.so"
+fi
+
 # Apply patched DLLs (Cecil-modified to fix Linux-specific bugs)
 # Patch #14: CodeAnalysis.dll — fix IsTypeForwardingCircular NullRef on Linux
 #   BC's Cecil type loader crashes following type-forwarding chains in netstandard.dll.
