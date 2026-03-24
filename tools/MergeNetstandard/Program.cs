@@ -6,13 +6,14 @@ using System.Linq;
 
 class Program
 {
-    static readonly string BaseDir = "/home/stefan/Documents/Repos/community/alDirectCompile";
+    static readonly string BaseDir = Environment.GetEnvironmentVariable("BASE_DIR")
+        ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
     static readonly string RefAsmDir = Path.Combine(BaseDir, "StartupHook/refasm");
     static readonly string PatchedDir = Path.Combine(BaseDir, "StartupHook/patched");
-    static readonly string ServiceTierDir = Path.Combine(BaseDir,
-        "artifacts/onprem/27.5.46862.0/platform/ServiceTier/PFiles64/Microsoft Dynamics NAV/270/Service");
-    static readonly string WebClientRefsDir = Path.Combine(BaseDir,
-        "artifacts/onprem/27.5.46862.0/platform/WebClient/PFiles/Microsoft Dynamics NAV/270/Web Client/WebPublish/refs");
+    static readonly string PlatformDir = Environment.GetEnvironmentVariable("PLATFORM_DIR")
+        ?? Path.Combine(BaseDir, "artifacts/onprem/27.5.46862.0/platform");
+    static readonly string ServiceTierDir = FindServiceTierDir(PlatformDir);
+    static readonly string WebClientRefsDir = FindWebClientRefsDir(PlatformDir);
 
     // Search directories for resolving target assemblies (in priority order)
     static readonly string[] SearchDirs = new[]
@@ -21,6 +22,23 @@ class Program
         RefAsmDir,
         WebClientRefsDir,
     };
+
+    static string FindServiceTierDir(string platformDir)
+    {
+        // Search for the service tier directory containing Microsoft.Dynamics.Nav.Server.dll
+        foreach (var dll in Directory.GetFiles(platformDir, "Microsoft.Dynamics.Nav.Server.dll", SearchOption.AllDirectories))
+            return Path.GetDirectoryName(dll)!;
+        return Path.Combine(platformDir, "ServiceTier"); // fallback
+    }
+
+    static string FindWebClientRefsDir(string platformDir)
+    {
+        // Search for the WebClient refs directory
+        foreach (var dir in Directory.GetDirectories(platformDir, "refs", SearchOption.AllDirectories))
+            if (dir.Contains("WebClient") || dir.Contains("WebPublish"))
+                return dir;
+        return Path.Combine(platformDir, "WebClient"); // fallback
+    }
 
     static void Main(string[] args)
     {
