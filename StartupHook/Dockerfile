@@ -22,6 +22,9 @@ COPY ["StartupHook/refasm/", "/bc/refasm/"]
 # This is SEPARATE from /bc/hook/ DrawingStub which is loaded at runtime
 COPY ["StartupHook/DrawingStub/bin/Release/net8.0/System.Drawing.Common.dll", "/bc/addins-overlay/System.Drawing.Common.dll"]
 
+# Copy MockTest.dll for test framework (required by System Application Test Library)
+COPY ["StartupHook/testdata/MockTest.dll", "/bc/addins-overlay/MockTest.dll"]
+
 # Copy scripts and test runner
 COPY ["scripts/download-artifacts.sh", "scripts/entrypoint.sh", "/bc/scripts/"]
 COPY ["TestRunnerExtension/TestRunner.app", "/bc/testrunner/TestRunner.app"]

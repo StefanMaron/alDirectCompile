@@ -189,6 +189,19 @@ if [ ! -f "$ADDINS_DIR/System.Runtime.dll" ] && [ -d /bc/refasm ]; then
         cp /bc/addins-overlay/System.Drawing.Common.dll "$ADDINS_DIR/System.Drawing.Common.dll"
         echo "[entrypoint] Applied DrawingStub to Add-Ins (compile-time)"
     fi
+
+    # Layer 5: MockTest.dll for test framework (required by Test Library)
+    # Try from image overlay first, fall back to artifacts
+    if [ -f /bc/addins-overlay/MockTest.dll ]; then
+        cp /bc/addins-overlay/MockTest.dll "$ADDINS_DIR/MockTest.dll"
+        echo "[entrypoint] Copied MockTest.dll to Add-Ins (from image)"
+    else
+        MOCK_DLL=$(find "$ARTIFACTS/platform" -path "*/Mock Assemblies/MockTest.dll" 2>/dev/null | head -1)
+        if [ -n "$MOCK_DLL" ]; then
+            cp "$MOCK_DLL" "$ADDINS_DIR/MockTest.dll"
+            echo "[entrypoint] Copied MockTest.dll to Add-Ins (from artifacts)"
+        fi
+    fi
 fi
 
 
