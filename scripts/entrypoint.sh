@@ -137,13 +137,13 @@ if [ -d "$SERVICE_DIR/Add-ins" ] && [ ! -d "$SERVICE_DIR/Add-Ins" ]; then
 fi
 ADDINS_DIR="$SERVICE_DIR/Add-Ins"
 
-# Copy .NET runtime DLLs to Add-Ins for the AL compiler's Cecil type-forwarding chain.
-# BC's server-side compiler uses Cecil to resolve DotNet types. When types in netstandard.dll
-# are forwarded to other assemblies (System.Runtime → System.Private.CoreLib), Cecil needs
-# those target assemblies in the probing paths.
-if [ ! -f "$ADDINS_DIR/System.Private.CoreLib.dll" ]; then
-    cp /usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.*/*.dll "$ADDINS_DIR/" 2>/dev/null || true
-    echo "[entrypoint] Copied .NET runtime DLLs to Add-Ins for type-forwarding resolution"
+# Copy .NET REFERENCE assemblies to Add-Ins for Cecil type-forwarding resolution.
+# Reference assemblies are small (4MB total), always managed (no R2R), and contain
+# full type signatures. Runtime DLLs can't be used because many are R2R/native
+# which crash Cecil's metadata reader.
+if [ ! -f "$ADDINS_DIR/System.Runtime.dll" ] && [ -d /bc/refasm ]; then
+    cp /bc/refasm/*.dll "$ADDINS_DIR/" 2>/dev/null || true
+    echo "[entrypoint] Copied .NET reference assemblies to Add-Ins ($(ls /bc/refasm/*.dll | wc -l) files)"
 fi
 
 # =============================================================================

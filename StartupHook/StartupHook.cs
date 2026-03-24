@@ -451,10 +451,9 @@ internal class StartupHook
                     BindingFlags.Static | BindingFlags.NonPublic);
                 ApplyJmpHook(isCircular, noop!, "CecilDotNetTypeLoader.IsTypeForwardingCircular");
             }
-            else
-            {
-                Console.WriteLine("[StartupHook] IsTypeForwardingCircular method not found");
-            }
+
+            // Note: GetAssemblyNameFromPath null paths are fixed by only copying MANAGED .NET
+            // DLLs to Add-Ins (native/R2R DLLs crash Cecil's metadata reader).
         }
         catch (Exception ex)
         {
@@ -463,6 +462,7 @@ internal class StartupHook
     }
 
     private static bool IsTypeForwardingCircularNoop() => false;
+
 
     // ========================================================================
     // Hook all Watson entry points to prevent NullRef crash on Linux.

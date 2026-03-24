@@ -14,6 +14,9 @@ COPY ["StartupHook/bin/Release/net8.0/publish/", "/bc/hook/"]
 # Copy patched DLLs (Cecil-modified to fix Linux-specific bugs)
 COPY ["StartupHook/patched/", "/bc/patched/"]
 
+# Copy .NET reference assemblies (for server-side compiler type-forwarding resolution)
+COPY ["StartupHook/refasm/", "/bc/refasm/"]
+
 # Copy scripts and test runner
 COPY ["scripts/download-artifacts.sh", "scripts/entrypoint.sh", "/bc/scripts/"]
 COPY ["TestRunnerExtension/TestRunner.app", "/bc/testrunner/TestRunner.app"]
