@@ -24,12 +24,12 @@ Working workflow: `PipelinePerformanceComparison/.github/workflows/linux-full-pi
 
 | Bug | Root Cause | Fix |
 |-----|-----------|-----|
-| FileNotFoundException on CI | `find \| head -1` picked net9.0 SqlClient DLL instead of net8.0 (same size, different content). net9.0 references System.Data.Common v9.0.0.0 which doesn't exist in .NET 8 base image | Explicit net8.0 verification in CI workflow |
-| No entrypoint logs visible | bash stdout is pipe-buffered when PID 1 has no TTY. On container crash, buffer is lost. stderr is unbuffered | `exec 1>&2` at top of entrypoint.sh |
-| AL compiler picks wrong files | `aldirectcompile/` clone in project dir contains .al files with IDs outside app.json range | `rm -rf aldirectcompile` before `AL compile` |
-| Test runner API 404 | Custom API pages served on port 7052 (HttpSysStub maps `/api` → `:7052`), not OData port 7048 | Fixed URL to port 7052 |
-| Extension publish ID conflict | TestRunner.app and sample ext both use IDs 50002-50004 | Don't publish separate TestRunner (sample ext already includes it) |
-| Watson crash handler | `WatsonReporting.GetRegistryValue` calls Windows registry → NullRef | Patch #13: JMP hook SendReport to no-op |
+| FileNotFoundException on CI | `find \| head -1` picked net9.0 SqlClient DLL instead of net8.0 | Explicit net8.0 verification in CI workflow |
+| No entrypoint logs visible | bash stdout is pipe-buffered when PID 1 has no TTY | `exec 1>&2` at top of entrypoint.sh |
+| AL compiler picks wrong files | `aldirectcompile/` clone in project dir contains .al files | `rm -rf aldirectcompile` before `AL compile` |
+| Test runner API 404 | Custom API pages served on port 7052, not OData port 7048 | Fixed URL to port 7052 |
+| Extension publish ID conflict | TestRunner.app and sample ext both use IDs 50002-50004 | Don't publish separate TestRunner |
+| Watson crash handler | `WatsonReporting.GetRegistryValue` → NullRef (no Windows registry) | Patch #13: JMP hook SendReport to no-op |
 
 **3. BCApps System Application Compiles on Linux**
 
@@ -41,150 +41,249 @@ System Application Test     | 224   | ~10s
 TOTAL                       | 1657  | ~21s
 ```
 
-Key discovery: AL compiler's Cecil type loader crashes with .NET RUNTIME DLLs in
-assembly probing paths (type-forwarding chains cause NullRef in
-`IsTypeForwardingCircular`). **Fix: use .NET 8 REFERENCE assemblies instead.**
-Reference assemblies are stubs with type definitions but no forwarding chains.
+BCApps tag `releases/27.5/StrictMode` matches our v27.5 platform artifacts exactly.
 
-BCApps tag `releases/27.5/StrictMode` matches our v27.5 platform artifacts exactly
-(the `releases/26.0` branch had codeunit renames that didn't match).
+---
 
-**4. Infrastructure**
+## Session: 2026-03-24
 
-- 13 startup patches (was 12, added Watson reporting no-op)
-- Persistent `/bc/service` volume for fast restarts (~35s vs ~160s)
-- .NET runtime tuning (Server GC, tiered compilation)
-- Separate workflow files: `linux-full-pipeline.yml`, `bcapps-system-test.yml`
-- `docs/performance-strategy.md` with pitch and optimization ideas
+### What Was Achieved
 
-### What Is NOT Yet Working
+**4. Watson Crash Prevention (FULLY FIXED)**
 
-**1. BCApps Test Extension Publishing (the ONE remaining blocker)**
+Watson reporting (`WatsonReporting.GetRegistryValue`) caused process-terminating
+NullRef crashes on the GC finalizer thread. Root cause chain:
 
-The System Application Test Library fails to PUBLISH via the dev endpoint (HTTP 422).
-Root cause chain fully identified:
+```
+UnobservedTaskException → NavEnvironment handler → WriteWatsonLog
+→ SendReport → GetWatsonPath → GetRegistryValue → NullRef (no Windows registry)
+→ finalizer thread crash → process exit
+```
 
-1. Dev endpoint ALWAYS triggers server-side AL recompilation (even for pre-compiled .app)
-2. Server-side compiler loads `assembly("netstandard")` from .NET runtime path (ignores Add-Ins)
-3. .NET 8's `netstandard.dll` is a facade with type-forwarding (Dictionary → System.Runtime → CoreLib)
-4. BC's Cecil-based type resolver does NOT follow type-forwarding chains
-5. Types `GenericList1`, `XmlDocument`, `GenericDictionary2` declared in System Application → assembly("netstandard") → resolution fails
+Multi-layer fix:
+- `TaskScheduler.UnobservedTaskException` handler with `SetObserved()` (first defense)
+- **Timer-based cleanup** every 1s that removes BC's NavEnvironment Watson handler via
+  reflection on `typeof(TaskScheduler).GetField("UnobservedTaskException")` (aggressive cleanup)
+- **Tiered compilation disabled** (`DOTNET_TieredCompilation=0`) to prevent JMP hooks
+  from being overwritten by Tier 1 recompilation
+- JMP hooks on `SendReport`, `GetWatsonPath`, `GetRegistryValue` (defense-in-depth)
 
-**What was tried and learned:**
+**5. Patch #14: Binary-Patched CodeAnalysis.dll (IsTypeForwardingCircular)**
 
-| Approach | Result |
-|----------|--------|
-| Stub netstandard.dll in Add-Ins (no forwarding) | BC ignores Add-Ins for netstandard — loads from .NET runtime path |
-| Patched netstandard.dll via Cecil (real identity + stub types) | Same: runtime path takes precedence |
-| Replace netstandard in runtime path | .NET runtime crashes (stubs have no method implementations) |
-| BCNetStubs.dll (custom assembly) in Add-Ins | Works for type finding but needs method signatures for validation |
-| Add DotNet declarations to Test Library directly | Dependency declarations (System App) take precedence |
-| Strip AL source from .app (runtime package) | Invalid package format |
+**Root cause discovered:** BC's server-side AL compiler uses Mono.Cecil to load .NET
+assemblies for DotNet type validation. On .NET 8, `netstandard.dll` is a facade with
+type-forwarding (Dictionary → System.Runtime → System.Private.CoreLib). Cecil's
+`CecilDotNetTypeLoader.IsTypeForwardingCircular` crashes with NullRef when following
+these chains.
 
-**Path forward (not yet implemented):**
+**Fix:** Binary IL patch — replace `IsTypeForwardingCircular` method body with
+`ldc.i4.0; ret` (return false = not circular). This allows the forwarding chain to
+be followed. Method body at file offset `0x1DDC28` in `Microsoft.Dynamics.Nav.CodeAnalysis.dll`.
 
-- **Option A**: Build complete BCNetStubs by merging .NET reference assemblies (have full method signatures). Requires Cecil-based tool to copy type metadata from ~40 reference assembly DLLs. Then modify System Application's dotnet.al to use BCNetStubs instead of netstandard.
-- **Option B**: Call management API (`NavAppPublisher.Publish`) directly via WCF/WebSocket from within BC process. The management path (Publish-NAVApp cmdlet) doesn't recompile — it accepts pre-compiled packages.
-- **Option C**: Patch BC's Cecil type resolver to follow type-forwarding (hook in StartupHook).
+**Why not JMP hook:** The assembly is loaded into a different AssemblyLoadContext by
+BC's runtime. JMP hooks applied to the eagerly-loaded instance don't affect the
+runtime-loaded instance. Binary IL patching modifies the DLL file directly.
 
-Microsoft's own BCApps pipeline uses the management cmdlet path (Publish-NAVApp), not the dev endpoint. They also uninstall all pre-installed apps first, then publish from scratch.
+**6. Patched Mono.Cecil.dll (CheckFileName)**
 
-**Key files:**
-- MockTest.dll: available at `artifacts/onprem/.../platform/Test Assemblies/Mock Assemblies/`
-- BCNetStubs approach: requires `assembly("netstandard")` → `assembly("BCNetStubs")` change in System Application's dotnet.al
+**Problem:** When the type-forwarding chain is followed, Cecil tries to load assemblies
+from Add-Ins. Some paths in the assembly candidate list are empty strings. Cecil's
+`Mixin.CheckFileName` throws `ArgumentNullOrEmptyException` for empty paths, which is
+NOT caught by `GetAssemblyNameFromPath`'s catch blocks (it only catches `IOException`,
+`BadImageFormatException`, etc.).
 
-**2. Watson Crash Prevention (FIXED)**
+**Fix:** Cecil-rewrite `CheckFileName` to throw `BadImageFormatException` for
+null/empty paths instead of `ArgumentNullOrEmptyException`. `BadImageFormatException`
+IS caught by the existing handler, so empty paths are gracefully skipped.
 
-Watson reporting (WatsonReporting.GetRegistryValue) caused NullRef crashes on the GC
-finalizer thread. Fixed by:
-- TaskScheduler.UnobservedTaskException handler with SetObserved()
-- Timer-based cleanup that strips BC's NavEnvironment Watson handler via reflection
-- Disabling tiered compilation (DOTNET_TieredCompilation=0) to keep JMP hooks stable
-- JMP hooks on SendReport, GetWatsonPath, GetRegistryValue as defense-in-depth
+**7. .NET 8 Reference Assemblies in Add-Ins**
 
-**3. ~6 min Startup Delay (Win32Exception)**
+BC's server-side compiler probes Add-Ins for .NET assemblies needed by the type-
+forwarding chain. On Windows, the types are found in the .NET Framework. On Linux,
+we need them in Add-Ins.
 
-Every cold start has ~10 retries of a Win32Exception (0x80004005) with 30s backoff.
-This is NOT the SPN registration (we patched `AllowToRegisterServicePrincipalName`
-to return false). The actual source is unclear — the exception stack trace is empty
-in the BC error log format. It happens during extension compilation on startup.
-Despite the errors, BC eventually starts successfully.
+**Key discovery:** .NET 8 runtime DLLs are mostly **ReadyToRun (R2R) native** DLLs
+(89 out of 168). Cecil crashes when trying to read their metadata. Only 79 are
+managed and readable by Cecil.
 
-### Architecture (Current)
+**Fix:** Copy .NET 8 **reference assemblies** (163 files, 4MB total) from the SDK
+pack (`Microsoft.NETCore.App.Ref/8.0.*/ref/net8.0/`) to Add-Ins. Reference assemblies
+are always managed, have full type signatures, and are small.
+
+**8. Pre-Installed Apps Cleared from Database**
+
+The dev endpoint refuses to publish System Application because "it would replace the
+existing AppSource app which is a dependency of other apps". Microsoft's own BCApps
+pipeline handles this by uninstalling all apps first.
+
+**Fix:** In `entrypoint.sh`, clear all installed/published app tables via SQL before
+BC starts:
+```sql
+DELETE FROM [NAV App Installed App];
+DELETE FROM [NAV App Dependencies];
+DELETE FROM [Published Application];
+-- etc.
+```
+
+This gives BC a clean slate with no dependency conflicts.
+
+**9. Add-Ins Case-Sensitivity Fix**
+
+BC expects the directory name `Add-Ins` (capital I) but the artifacts create it as
+`Add-ins` (lowercase i). On Linux (case-sensitive filesystem), BC's probing fails
+silently.
+
+**Fix:** Rename in entrypoint: `mv Add-ins Add-Ins`
+
+**10. MockTest.dll Located in BC Artifacts**
+
+The Test Library references `assembly("MockTest")` for `MockAzureKeyVaultSecretProvider`.
+This DLL is NOT in the BCApps repo — it's shipped with BC at:
+```
+artifacts/onprem/.../platform/Test Assemblies/Mock Assemblies/MockTest.dll
+```
+
+**11. BCApps Pipeline Analysis (Microsoft's Approach)**
+
+Decompiled the entire publish chain and analyzed the BCApps CI/CD workflows:
+
+| Finding | Detail |
+|---------|--------|
+| MS uses Publish-NAVApp, NOT dev endpoint | Management cmdlet path doesn't recompile |
+| Dev endpoint ALWAYS recompiles | `PublishAndInstallExtension → NavAppPackageCompiler.Recompile()` |
+| Management API uses WCF/WebSocket | Port 7045, NetHttpBinding, requires Windows auth |
+| `IsRuntimePackage` flag skips compilation | But only for packages with no source code |
+| MS uninstalls ALL apps first | Then publishes from scratch with `-skipVerification -scope Global` |
+
+### Current State: Server-Side Compilation Runs Without Internal Errors
+
+The combination of all fixes eliminates all crashes and internal errors:
+- ✅ No more `IsTypeForwardingCircular` NullRef
+- ✅ No more `CheckFileName` empty path exception
+- ✅ No more `InvalidProgramException` from bad IL
+- ✅ No more Watson crash on finalizer thread
+- ✅ No more dependency conflict rejections
+
+The server-side compiler now runs and produces **normal AL compilation errors**:
+`AL0452: The type 'X' could not be found in assembly 'netstandard'`
+
+### The ONE Remaining Blocker
+
+**236 .NET types cannot be resolved through the type-forwarding chain.**
+
+The forwarding chain: `netstandard → System.Collections → defines List<T>`. Our
+reference assemblies in Add-Ins have the types. But the .NET runtime directory
+(`/usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.25/`) ALSO contains assemblies
+with the same names — these are native/R2R and unreadable by Cecil.
+
+**The problem:** When Cecil follows a type-forward from `netstandard` to
+`System.Collections`, it finds TWO candidates:
+1. Our reference assembly in Add-Ins (managed, readable, has the type) ✅
+2. The runtime's R2R version in the .NET path (native, unreadable) ❌
+
+Cecil (or BC's assembly resolver) picks the wrong one. The .NET runtime path is
+in the probing list and may take priority over Add-Ins for certain resolution paths.
+
+**Solution (not yet implemented):**
+- **Option A**: Remove/rename the native .NET DLLs in the runtime directory so
+  Cecil only finds the reference assemblies in Add-Ins
+- **Option B**: Patch BC's `AssemblyLocatorBase.GetPathToCompatibleAssemblyFromCandidates`
+  to prefer Add-Ins over the runtime path
+- **Option C**: Replace the runtime netstandard.dll with a version that forwards
+  to assembly names that ONLY exist in Add-Ins (custom forwarding targets)
+
+---
+
+## Architecture (Current)
 
 ```
 GitHub Actions Runner (ubuntu-latest, 7GB RAM)
 ├── Pre-downloads BC artifacts (curl + unzip on host)
 ├── Builds Docker image (alDirectCompile/StartupHook/Dockerfile)
 │   └── Contains: StartupHook.dll + 6 stubs + libwin32_stubs.so + scripts
+│   └──           + patched CodeAnalysis.dll + patched Mono.Cecil.dll
+│   └──           + 163 .NET 8 reference assemblies
 ├── docker compose up -d
 │   ├── sql (SQL Server 2022, healthcheck)
 │   └── bc (entrypoint.sh)
-│       ├── Waits for artifacts (docker compose cp from host)
 │       ├── Copies service tier to /bc/service/
-│       ├── Patches CustomSettings.config
+│       ├── Applies binary-patched DLLs
+│       ├── Renames Add-ins → Add-Ins
+│       ├── Copies .NET reference assemblies to Add-Ins
+│       ├── Clears pre-installed apps from SQL
 │       ├── Restores CRONUS, creates user, imports license
-│       ├── Starts: DOTNET_STARTUP_HOOKS=... dotnet Microsoft.Dynamics.Nav.Server.dll /console
-│       └── Background: publishes TestRunner.app via dev endpoint
-├── Workflow: AL compile /project:. → produces .app
+│       └── Starts: DOTNET_STARTUP_HOOKS=... dotnet Microsoft.Dynamics.Nav.Server.dll
+├── Workflow: AL compile → produces .app
 ├── Workflow: curl POST .app to dev endpoint (publish)
 └── Workflow: curl to port 7052 (custom API) → run tests → read logEntries
 ```
 
-### Port Map (HttpSysStub Kestrel routing)
+## All Patches (14 total)
 
-| Original URL prefix | Kestrel port | Service |
-|---------------------|-------------|---------|
-| `:7047/InstanceName` | 7047 | SOAP (legacy) |
-| `:7048/InstanceName/ODataV4` | 7048 | OData V4 |
-| `:7048/InstanceName/api` | 7052 | Custom API pages |
-| `:7048/InstanceName/api/webhooks` | 7051 | Webhooks |
-| `:7049/InstanceName/dev` | 7049 | Dev endpoint (publish) |
-| `:7085/InstanceName/client` | 7085 | Web client |
-| `:7086/InstanceName/managementapi` | 7087 | Management API |
+| # | Target DLL | Method | What it does |
+|---|-----------|--------|-------------|
+| 1 | Nav.Language | `OnAppDomainAssemblyResolve`, `ResolveSatelliteAssembly` | No-op (prevent satellite assembly stack overflow) |
+| 2 | Nav.Ncl | `NavEnvironment..cctor` | Replace static ctor (avoids WindowsIdentity) |
+| 3 | kernel32.dll | All P/Invoke | `libwin32_stubs.so` C shared library |
+| 4 | Nav.Types | `NavEventLogEntryWriter.WriteEntry` | No-op (EventLog unsupported) |
+| 5 | Nav.Ncl + Nav.Types | `NavOpenTelemetryLogger`, Geneva | No-op + stub DLL |
+| 6 | System.Drawing | Font enumeration | Stub DLL + `EnableUnixSupport` |
+| 7 | Nav.Types | Encryption provider | Passthrough (no DPAPI) |
+| 8 | PerformanceCounter | - | Stub DLL |
+| 9 | Nav.Ncl | Topology | `IsServiceRunningInLocalEnvironment=false` |
+| 10 | Principal.Windows | WindowsIdentity, SecurityIdentifier | Framework-level stub |
+| 11 | HttpSys | `UseHttpSys()` | Redirect to Kestrel |
+| 12 | SqlClient | - | Replace with Unix build |
+| 13 | Nav.Watson | `SendReport`, `GetRegistryValue`, `GetWatsonPath` | JMP hooks to no-op + TaskScheduler handler cleanup |
+| 14 | CodeAnalysis | `IsTypeForwardingCircular` | **Binary IL patch** → return false |
+| 14b | Mono.Cecil | `Mixin.CheckFileName` | **Cecil rewrite** → throw BadImageFormatException for empty paths |
 
-### Key Technical Decisions
+## Binary Patch Details
 
-1. **Reference assemblies for AL compiler probing** — Runtime DLLs crash Cecil loader.
-   Ref assemblies provide type definitions without forwarding chains. This ONLY works
-   for client-side AL compiler tool, not BC's server-side compiler.
+### CodeAnalysis.dll (`IsTypeForwardingCircular`)
+- **File:** `Microsoft.Dynamics.Nav.CodeAnalysis.dll` (10.7MB)
+- **Method RVA:** 0x001DFA28
+- **File offset:** 0x001DDC28
+- **Original header:** Fat (0x3013), MaxStack=3, CodeSize=115, 4 locals, 1 exception handler
+- **Patched header:** Tiny (0x0A), CodeSize=2
+- **Patched IL:** `ldc.i4.0 (0x16); ret (0x2A)` — return false
+- **Zero-out:** 177 bytes (fat header + IL + exception handler section)
 
-2. **No tmpfs for CI** — Tested tmpfs for `/bc/service` and `/var/opt/mssql/data`.
-   Was 1.5 min SLOWER on 7GB runners (pre-allocates RAM, less for OS page cache).
+### Mono.Cecil.dll (`CheckFileName`)
+- **File:** `Mono.Cecil.dll` (355KB)
+- **Method RVA:** deduced by Cecil tool
+- **Fix:** Cecil assembly rewrite (not binary patch) — small DLL, Cecil can rewrite safely
+- **New body:** `if (string.IsNullOrEmpty(fileName)) throw new BadImageFormatException(); return;`
 
-3. **Persistent volume for `/bc/service`** — Named Docker volume survives container
-   restarts. First boot: ~160s. Subsequent restarts: ~35s. Essential for iterative
-   development locally. Not used in CI (each run is clean).
+## Key Technical Decisions
 
-4. **BCApps tag not branch** — `releases/27.5/StrictMode` tag matches v27.5 artifacts.
-   The `releases/26.0` branch has codeunit renames that cause compile errors.
+1. **Binary IL patches over JMP hooks for CodeAnalysis/Cecil** — BC loads these DLLs
+   into a different AssemblyLoadContext. JMP hooks applied to eagerly-loaded instances
+   don't affect the runtime-loaded instances. Binary patches modify the file itself.
 
-### Constraints
+2. **Reference assemblies over runtime DLLs** — 89 of 168 .NET 8 runtime DLLs are
+   ReadyToRun (native), which crashes Cecil's PE/metadata reader. Reference assemblies
+   (163 files, 4MB) are always managed and have full type signatures.
 
-- **No pre-baked artifacts**: Must be version-agnostic (support n, n-1, n-2, all minors)
-- **No persistent state between CI runs**: Each run is clean (no test cross-contamination)
-- **7GB RAM on GitHub runners**: Must fit SQL + BC + tools in ~7GB
-- **Compile-only is out of scope**: Microsoft already supports AL compile on Linux.
-  The value-add is the full service tier path (compile + publish + test execution)
+3. **Pre-clear all installed apps** — The dev endpoint refuses to replace AppSource
+   dependencies. Clearing all published/installed app tables before BC starts gives a
+   clean slate. BC boots instantly with no extensions to compile.
 
-### Next Steps (Priority Order)
+4. **Tiered compilation disabled** — `DOTNET_TieredCompilation=0` prevents Tier 1
+   recompilation from overwriting JMP hooks on Watson reporting methods.
 
-1. **Solve server-side extension publish for BCApps tests**
-   - Option A: Get management API working (needs auth bypass for NTLM/Windows auth)
-   - Option B: Direct SQL — insert compiled .app into `$ndo$navapppackage` table
-   - Option C: Copy .NET runtime DLLs to Add-Ins AND patch BC's assembly resolver
-     to handle type forwarding correctly
-   - Option D: Ready-to-run packages — clear installed extensions, boot empty, publish
-     pre-compiled apps that don't need server-side recompilation
+## Next Steps (Priority Order)
 
-2. **Reduce the ~6 min Win32Exception startup delay**
-   - Identify the actual source (extension compilation? network? something else?)
-   - Patch or configure to eliminate the retry loop
+1. **Fix the assembly resolution priority** — Make Cecil prefer reference assemblies
+   in Add-Ins over native DLLs in the .NET runtime path. This is the ONLY remaining
+   blocker for System Application server-side compilation.
 
-3. **Collect timing numbers for the pitch**
-   - Linux headless vs Windows container for sample extension
-   - Linux headless vs Windows container for BCApps System Application
-   - Fill in the numbers table in performance-strategy.md
+2. **Publish System Application + Test Library + Tests**
+   - Once type resolution works, publish System Application via dev endpoint
+   - Then publish Test Library and System Application Test
 
-4. **Clean up debug commits** — Many debug/fix commits from this session.
-   Squash into clean commits once everything is stable.
+3. **Execute System Application tests and collect timing numbers**
+
+4. **Update PipelinePerformanceComparison workflow** with the full fix chain
+
+5. **Reduce ~6 min Win32Exception startup delay** (secondary goal)

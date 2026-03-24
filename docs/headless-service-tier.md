@@ -22,14 +22,17 @@ StartupHook.dll (JMP patches for Linux compatibility)
 We run the REAL service tier. Microsoft's code handles initialization, metadata loading,
 sessions, test execution. We only patch the parts that crash on Linux.
 
-## Current Status (as of 2026-03-23)
+## Current Status (as of 2026-03-24)
 
 **The BC v27.5 service tier runs on Linux in Docker.** Key milestones reached:
-- 12 startup patches applied via DOTNET_STARTUP_HOOKS
+- 14 startup patches applied (JMP hooks + binary IL patches)
+- 2 binary-patched DLLs (CodeAnalysis, Mono.Cecil) for type-forwarding fix
+- 163 .NET 8 reference assemblies deployed to Add-Ins
 - SQL connected to CRONUS database (Docker SQL Server 2022)
-- All BC extensions compiled (Base Application, System Application, ~30 extensions)
-- 7 Kestrel API hosts created (ports 18001-18007)
-- **ONE remaining blocker**: SPN registration NullRef (see Patch #12 below)
+- Full CI pipeline GREEN on GitHub Actions (sample extension: 5 tests pass)
+- Server-side AL compiler runs without internal errors
+- **ONE remaining blocker**: 236 .NET types unresolved through type-forwarding chain
+  (Cecil resolves to native/R2R DLLs in runtime path instead of ref assemblies in Add-Ins)
 
 ## Service Tier Feature Decisions (Pipeline Scope)
 
@@ -154,15 +157,45 @@ NullRef on Linux.
 
 ### **MILESTONE: SQL connected, all extensions compiled, 7 Kestrel hosts up.**
 
-### Remaining Blocker: SPN Registration NullRef
+### Patch #13: Watson Crash Reporting — DONE ✅
 
-**Problem:** `ServicePrincipalHelper.SpnRegister` calls `NavEnvironment.get_ServiceAccount()`
-which returns `SecurityIdentifier("S-1-5-18")` from our WindowsPrincipal stub. SpnRegister
-then uses this for Active Directory SPN registration — which is Windows-only and crashes.
+**Problem:** `WatsonReporting.GetRegistryValue` crashes with NullRef on the GC finalizer
+thread when unobserved task exceptions trigger Watson reporting (no Windows registry on Linux).
+**Fix:** Multi-layer defense:
+1. `TaskScheduler.UnobservedTaskException` handler with `SetObserved()`
+2. Timer-based cleanup removes BC's NavEnvironment Watson handler via reflection
+3. Tiered compilation disabled (`DOTNET_TieredCompilation=0`) to keep JMP hooks stable
+4. JMP hooks on `SendReport`, `GetWatsonPath`, `GetRegistryValue`
+
+### Patch #14: Cecil Type-Forwarding Fix — DONE ✅
+
+**Problem:** BC's server-side AL compiler uses Cecil to validate DotNet types from
+`assembly("netstandard")`. On .NET 8, netstandard.dll uses type-forwarding chains
+(Dictionary → System.Runtime → System.Private.CoreLib). Cecil's
+`CecilDotNetTypeLoader.IsTypeForwardingCircular` crashes with NullRef following these chains.
+**Fix:** Binary IL patch on `Microsoft.Dynamics.Nav.CodeAnalysis.dll` — replace
+`IsTypeForwardingCircular` method body with `return false`. Applied via `entrypoint.sh`
+at service tier setup time.
+
+### Patch #14b: Cecil CheckFileName Fix — DONE ✅
+
+**Problem:** With type-forwarding enabled, Cecil encounters empty file paths from the
+assembly scanner. `Mixin.CheckFileName` throws `ArgumentNullOrEmptyException` which is
+not caught by `GetAssemblyNameFromPath`'s handler (only catches `BadImageFormatException` etc.).
+**Fix:** Cecil rewrite of `Mono.Cecil.dll` — `CheckFileName` now throws
+`BadImageFormatException` for null/empty paths, which IS caught by existing handlers.
+
+### Remaining Blocker: Assembly Resolution Priority
+
+**Problem:** After fixing type-forwarding, 236 .NET types still unresolved. The
+forwarding chain leads to assemblies like `System.Collections.dll`. Both our managed
+reference assembly (in Add-Ins, readable by Cecil) and the native R2R runtime version
+(in .NET runtime path, unreadable by Cecil) exist. Cecil resolves to the wrong one.
 
 **Fix options:**
-1. Make SpnRegister a no-op via nclcsrts.dll stub (already have `NCL_SpnRegister` returning 0)
-2. Make the SecurityIdentifier stub more complete so the code path succeeds harmlessly
+1. Remove/rename native DLLs in the .NET runtime directory
+2. Patch BC's assembly resolver to prefer Add-Ins
+3. Use custom forwarding targets that only exist in Add-Ins
 
 ## Technical Findings
 
