@@ -155,6 +155,27 @@ internal class StartupHook
             PatchCecilTypeForwarding(args.LoadedAssembly);
         }
 
+        // Patch Cecil's CheckFileName to not throw on empty paths.
+        // BC's assembly scanner produces empty-string paths from some probing directories
+        // on Linux. GetAssemblyNameFromPath catches most exceptions but NOT
+        // Mono.ArgumentNullOrEmptyException from CheckFileName.
+        if (name == "Mono.Cecil")
+        {
+            try
+            {
+                var mixinType = args.LoadedAssembly.GetType("Mono.Cecil.Mixin");
+                var checkFn = mixinType?.GetMethod("CheckFileName",
+                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                if (checkFn != null)
+                {
+                    var noop = typeof(StartupHook).GetMethod(nameof(CheckFileNameNoop),
+                        BindingFlags.Static | BindingFlags.NonPublic);
+                    ApplyJmpHook(checkFn, noop!, "Mono.Cecil.Mixin.CheckFileName");
+                }
+            }
+            catch { }
+        }
+
         // Re-apply encryption bypass after Main() overrides it.
         // Guard against recursion (DispatchProxy.Create triggers assembly loads).
         if (!_encryptionBypassed && !_encryptionApplying && name == "Microsoft.Dynamics.Nav.Core")
@@ -187,6 +208,9 @@ internal class StartupHook
         // Must be patched BEFORE any server-side compilation happens.
         TryEagerLoadAndPatch(baseDir, "Microsoft.Dynamics.Nav.CodeAnalysis.dll",
             "Nav.CodeAnalysis.dll (Cecil type forwarding)", PatchCecilTypeForwarding, () => false);
+        // Patch Cecil's CheckFileName to not throw on empty file paths
+        TryEagerLoadAndPatch(baseDir, "Mono.Cecil.dll",
+            "Mono.Cecil (CheckFileName empty path fix)", PatchCecilCheckFileName, () => false);
         // DON'T eagerly load Nav.Ncl.dll and Nav.Types.dll — let the runtime load them
         // naturally. Eager LoadFrom creates a separate instance that the runtime doesn't use,
         // which is why JMP hooks on many methods fail (they patch the wrong instance).
@@ -462,6 +486,31 @@ internal class StartupHook
     }
 
     private static bool IsTypeForwardingCircularNoop() => false;
+    private static void CheckFileNameNoop() { } // Allow empty paths — caller handles null results
+
+    private static void PatchCecilCheckFileName(Assembly cecilAsm)
+    {
+        try
+        {
+            var mixinType = cecilAsm.GetType("Mono.Cecil.Mixin");
+            var checkFn = mixinType?.GetMethod("CheckFileName",
+                BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+            if (checkFn != null)
+            {
+                var noop = typeof(StartupHook).GetMethod(nameof(CheckFileNameNoop),
+                    BindingFlags.Static | BindingFlags.NonPublic);
+                ApplyJmpHook(checkFn, noop!, "Mono.Cecil.Mixin.CheckFileName");
+            }
+            else
+            {
+                Console.WriteLine("[StartupHook] Mono.Cecil.Mixin.CheckFileName not found");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[StartupHook] Cecil CheckFileName patch failed: {ex.Message}");
+        }
+    }
 
 
     // ========================================================================

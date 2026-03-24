@@ -30,3 +30,5 @@ Thumbs.db
 .claude/
 .snapshots/
 StartupHook/patched/*.dll
+StartupHook/refasm/
+StartupHook/patched/

@@ -129,6 +129,12 @@ if [ -f /bc/patched/Microsoft.Dynamics.Nav.CodeAnalysis.dll ]; then
     [ -d "$SERVICE_DIR/Admin" ] && cp /bc/patched/Microsoft.Dynamics.Nav.CodeAnalysis.dll "$SERVICE_DIR/Admin/Microsoft.Dynamics.Nav.CodeAnalysis.dll"
     echo "[entrypoint] Applied patched CodeAnalysis.dll (Patch #14: type forwarding fix)"
 fi
+# Patch Mono.Cecil's CheckFileName to not throw on empty file paths
+if [ -f /bc/patched/Mono.Cecil.dll ]; then
+    cp /bc/patched/Mono.Cecil.dll "$SERVICE_DIR/Mono.Cecil.dll"
+    [ -d "$SERVICE_DIR/Admin" ] && cp /bc/patched/Mono.Cecil.dll "$SERVICE_DIR/Admin/Mono.Cecil.dll"
+    echo "[entrypoint] Applied patched Mono.Cecil.dll (CheckFileName empty path fix)"
+fi
 
 # Fix Add-Ins directory case (Linux is case-sensitive, BC expects "Add-Ins")
 if [ -d "$SERVICE_DIR/Add-ins" ] && [ ! -d "$SERVICE_DIR/Add-Ins" ]; then
