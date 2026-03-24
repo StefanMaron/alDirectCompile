@@ -128,7 +128,7 @@ uint32_t FormatMessageW(uint32_t a, const void* b, uint32_t c, uint32_t d,
                         void* e, uint32_t f, void* g) { return 0; }
 
 // =============================================================================
-// user32.dll — OEM/ANSI character encoding conversion
+// user32.dll — OEM/ANSI encoding + keyboard layout functions
 // =============================================================================
 
 // Identity mapping: on Linux with UTF-8, OEM ≡ ANSI. Leave buffers unchanged.
@@ -140,6 +140,41 @@ int OemToCharBuffA(const uint8_t* src, uint8_t* dst, int size) {
 int CharToOemBuffA(const uint8_t* src, uint8_t* dst, int size) {
     if (src != dst) memcpy(dst, src, size);
     return 1;
+}
+
+// Keyboard layout functions — used by Microsoft.Dynamics.Framework.UI for
+// keyboard mapping. Return US English defaults on Linux.
+// GetKeyboardLayoutName: writes KL identifier string (e.g. "00000409" = US English)
+int GetKeyboardLayoutNameW(uint16_t* pwszKLID) {
+    // "00000409" in UTF-16LE (US English keyboard)
+    const uint16_t us[] = {'0','0','0','0','0','4','0','9', 0};
+    memcpy(pwszKLID, us, sizeof(us));
+    return 1;
+}
+// Alias — .NET marshaling may use either name
+int GetKeyboardLayoutName(uint16_t* pwszKLID) {
+    return GetKeyboardLayoutNameW(pwszKLID);
+}
+
+// LoadKeyboardLayout: returns a dummy HKL handle
+intptr_t LoadKeyboardLayoutW(const uint16_t* pwszKLID, uint32_t Flags) {
+    return (intptr_t)0x04090409; // US English HKL
+}
+intptr_t LoadKeyboardLayout(const uint16_t* pwszKLID, uint32_t Flags) {
+    return LoadKeyboardLayoutW(pwszKLID, Flags);
+}
+
+// GetKeyState: returns 0 (key not pressed)
+int16_t GetKeyState(int nVirtKey) { return 0; }
+
+// MapVirtualKeyEx: returns 0 (no mapping)
+uint32_t MapVirtualKeyExW(uint32_t uCode, uint32_t uMapType, intptr_t dwhkl) { return 0; }
+uint32_t MapVirtualKeyEx(uint32_t uCode, uint32_t uMapType, intptr_t dwhkl) { return 0; }
+
+// ToUnicodeEx: returns 0 (no translation)
+int ToUnicodeEx(uint32_t wVirtKey, uint32_t wScanCode, const uint8_t* lpKeyState,
+                uint16_t* pwszBuff, int cchBuff, uint32_t wFlags, intptr_t dwhkl) {
+    return 0;
 }
 
 // =============================================================================

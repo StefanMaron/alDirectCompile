@@ -174,7 +174,10 @@ namespace System.Drawing
         public Drawing2D.InterpolationMode InterpolationMode { get; set; }
         public Drawing2D.PixelOffsetMode PixelOffsetMode { get; set; }
         public Drawing2D.CompositingQuality CompositingQuality { get; set; }
+        public Drawing2D.CompositingMode CompositingMode { get; set; }
         public Text.TextRenderingHint TextRenderingHint { get; set; }
+        public float DpiX => 96f;
+        public float DpiY => 96f;
 
         public static Graphics FromImage(Image image) => new Graphics();
 
@@ -201,6 +204,46 @@ namespace System.Drawing
         Inch = 4,
         Document = 5,
         Millimeter = 6,
+    }
+
+    // TypeConverter for ImageFormat — BC instantiates this during schema sync for media fields
+    public class ImageFormatConverter : System.ComponentModel.TypeConverter
+    {
+        public override bool CanConvertFrom(System.ComponentModel.ITypeDescriptorContext? context, Type sourceType)
+            => sourceType == typeof(string) || base.CanConvertFrom(context, sourceType);
+
+        public override bool CanConvertTo(System.ComponentModel.ITypeDescriptorContext? context, Type? destinationType)
+            => destinationType == typeof(string) || base.CanConvertTo(context, destinationType);
+
+        public override object? ConvertFrom(System.ComponentModel.ITypeDescriptorContext? context,
+            System.Globalization.CultureInfo? culture, object value)
+        {
+            if (value is string s)
+            {
+                // Return known formats by name
+                return s.ToLowerInvariant() switch
+                {
+                    "bmp" => Imaging.ImageFormat.Bmp,
+                    "jpeg" or "jpg" => Imaging.ImageFormat.Jpeg,
+                    "png" => Imaging.ImageFormat.Png,
+                    "gif" => Imaging.ImageFormat.Gif,
+                    "tiff" or "tif" => Imaging.ImageFormat.Tiff,
+                    "icon" or "ico" => Imaging.ImageFormat.Icon,
+                    "emf" => Imaging.ImageFormat.Emf,
+                    "wmf" => Imaging.ImageFormat.Wmf,
+                    _ => Imaging.ImageFormat.Png
+                };
+            }
+            return base.ConvertFrom(context, culture, value);
+        }
+
+        public override object? ConvertTo(System.ComponentModel.ITypeDescriptorContext? context,
+            System.Globalization.CultureInfo? culture, object? value, Type destinationType)
+        {
+            if (destinationType == typeof(string) && value is Imaging.ImageFormat fmt)
+                return fmt.Guid.ToString();
+            return base.ConvertTo(context, culture, value, destinationType);
+        }
     }
 }
 
@@ -258,6 +301,12 @@ namespace System.Drawing.Drawing2D
     {
         Invalid = -1, Default = 0, HighSpeed = 1, HighQuality = 2, GammaCorrected = 3, AssumeLinear = 4,
     }
+
+    public enum CompositingMode
+    {
+        SourceOver = 0,
+        SourceCopy = 1,
+    }
 }
 
 // ============================================================================
@@ -266,6 +315,7 @@ namespace System.Drawing.Drawing2D
 
 namespace System.Drawing.Imaging
 {
+    [System.ComponentModel.TypeConverter(typeof(Drawing.ImageFormatConverter))]
     public sealed class ImageFormat
     {
         private readonly Guid _guid;
