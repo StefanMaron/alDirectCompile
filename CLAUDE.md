@@ -16,11 +16,10 @@ with 100% fidelity.
 extensions. BC v27.5 boots, compiles extensions, publishes apps, runs 5 AL tests
 via OData API. BCApps System Application (1264 files) compiles in ~6s locally.
 
-Server-side compilation now runs without internal errors (Patch #14 + CheckFileName
-fix). The ONE remaining blocker: 236 .NET types unresolved through type-forwarding
-chain because Cecil loads native/R2R DLLs from the .NET runtime path instead of
-managed reference assemblies from Add-Ins. See `docs/ci-pipeline-progress.md` for
-the full root cause analysis and solution path.
+Server-side compilation resolves all .NET types (Patch #15 — merged type-forward
+assemblies). AL0452 (type not found) errors: **236 → 0**. The remaining 97 errors
+are AL0132/AL0122/AL0133 (missing members on stub types in merged assemblies).
+These are fixable by improving the merge tool to copy complete member metadata.
 
 **See `docs/ci-pipeline-progress.md` for detailed session progress.**
 **See `docs/performance-strategy.md` for optimization plans.**
@@ -30,17 +29,18 @@ Docker SQL Server 2022 (CRONUS database)
     ↑ TCP
 DynamicsNavServer.Main() on Linux
     ↑ DOTNET_STARTUP_HOOKS
-StartupHook.dll (14 patches for Linux compat)
+StartupHook.dll (15 patches for Linux compat)
     + 6 stub DLL subprojects + libwin32_stubs.so
     + 2 binary-patched DLLs (CodeAnalysis, Mono.Cecil)
+    + 4 merged type-forward assemblies (netstandard, OpenXml, Drawing, Core)
     + 163 .NET 8 reference assemblies in Add-Ins
 ```
 
 Key files:
-- `StartupHook/StartupHook.cs` — All 14 patches (JMP hooks + assembly event handlers)
+- `StartupHook/StartupHook.cs` — All 15 patches (JMP hooks + assembly event handlers)
 - `StartupHook/Dockerfile` — Docker container definition
 - `StartupHook/kernel32_stubs.c` — C shared library for P/Invoke stubs
-- `StartupHook/patched/` — Binary-patched DLLs (CodeAnalysis, Mono.Cecil) — not in git
+- `StartupHook/patched/` — Binary-patched DLLs + merged assemblies — not in git
 - `StartupHook/refasm/` — .NET 8 reference assemblies for Add-Ins — not in git
 - `StartupHook/GenevaStub/` — OpenTelemetry.Exporter.Geneva stub
 - `StartupHook/DrawingStub/` — System.Drawing.Common stub
@@ -48,6 +48,7 @@ Key files:
 - `StartupHook/WindowsPrincipalStub/` — System.Security.Principal.Windows stub
 - `StartupHook/HttpSysStub/` — Microsoft.AspNetCore.Server.HttpSys stub (redirects to Kestrel)
 - `StartupHook/AclStub/` — (unused — ACL bypass done via topology proxy)
+- `tools/MergeNetstandard/` — Tool to merge type-forward assemblies (Patch #15)
 - `docker-compose.yml` — Docker orchestration (BC + SQL Server 2022)
 - `scripts/setup-sql.sh` — CRONUS database restore
 - `scripts/entrypoint.sh` — Container entrypoint (applies patches, clears apps, starts BC)
@@ -73,7 +74,7 @@ StartupHook/           — Headless service tier patches (Approach 1)
   ├── StartupHook.csproj
   ├── Dockerfile
   ├── kernel32_stubs.c
-  ├── patched/            — Binary-patched DLLs (not in git, see below)
+  ├── patched/            — Binary-patched DLLs + merged assemblies (not in git)
   ├── refasm/             — .NET 8 reference assemblies (not in git, see below)
   ├── GenevaStub/         — Geneva ETW exporter stub
   ├── DrawingStub/        — System.Drawing.Common stub
@@ -85,6 +86,8 @@ AlRunner/              — Standalone transpiler (Approach 2)
   ├── Program.cs
   ├── RoslynRewriter.cs
   └── Runtime/
+tools/
+  └── MergeNetstandard/  — Merge tool for type-forward assemblies (Patch #15)
 docker-compose.yml     — Docker orchestration
 scripts/
   ├── setup-sql.sh     — CRONUS database restore
@@ -113,6 +116,18 @@ by external tools and placed in `StartupHook/patched/`:
 
 Generate with the Cecil patcher tool at `/tmp/PatchNetstandard/` (or rebuild from
 the IL byte offsets documented in `docs/ci-pipeline-progress.md`).
+
+### Merged type-forward assemblies (not checked in)
+
+Four assemblies have their type-forwards resolved into direct type definitions using
+`tools/MergeNetstandard/`. Output goes to `StartupHook/patched/`:
+
+1. **netstandard-merged.dll** — 2604 type-forwards from 80 assemblies
+2. **DocumentFormat.OpenXml-merged.dll** — 91 type-forwards
+3. **System.Drawing-merged.dll** — 172 type-forwards
+4. **System.Core-merged.dll** — 248 type-forwards
+
+Generate: `cd tools/MergeNetstandard && dotnet run`
 
 ### .NET 8 Reference Assemblies (not checked in)
 
@@ -143,6 +158,7 @@ Download-Artifacts -artifactUrl $artifactUrl -basePath ./artifacts
 - **Fail-fast**: Unhandled features throw `NotSupportedException`
 - **Minimal patches**: Only patch what crashes on Linux, keep everything else real
 - **Binary IL patches**: Only when JMP hooks fail (tiered compilation, assembly context)
+- **Merged assemblies**: When BC's type-forwarding resolution fails silently
 - **Granular commits** with descriptive messages
 
 ## Notifications

@@ -25,14 +25,14 @@ sessions, test execution. We only patch the parts that crash on Linux.
 ## Current Status (as of 2026-03-24)
 
 **The BC v27.5 service tier runs on Linux in Docker.** Key milestones reached:
-- 14 startup patches applied (JMP hooks + binary IL patches)
+- 15 startup patches applied (JMP hooks + binary IL patches + merged assemblies)
 - 2 binary-patched DLLs (CodeAnalysis, Mono.Cecil) for type-forwarding fix
+- 4 merged type-forward assemblies (netstandard, OpenXml, Drawing, Core)
 - 163 .NET 8 reference assemblies deployed to Add-Ins
 - SQL connected to CRONUS database (Docker SQL Server 2022)
 - Full CI pipeline GREEN on GitHub Actions (sample extension: 5 tests pass)
-- Server-side AL compiler runs without internal errors
-- **ONE remaining blocker**: 236 .NET types unresolved through type-forwarding chain
-  (Cecil resolves to native/R2R DLLs in runtime path instead of ref assemblies in Add-Ins)
+- Server-side AL compiler resolves ALL .NET types (AL0452 errors: 236 → 0)
+- **Remaining**: 97 AL0132/AL0122 errors (missing members on stub types, fixable)
 
 ## Service Tier Feature Decisions (Pipeline Scope)
 
@@ -185,17 +185,26 @@ not caught by `GetAssemblyNameFromPath`'s handler (only catches `BadImageFormatE
 **Fix:** Cecil rewrite of `Mono.Cecil.dll` — `CheckFileName` now throws
 `BadImageFormatException` for null/empty paths, which IS caught by existing handlers.
 
-### Remaining Blocker: Assembly Resolution Priority
+### Patch #15: Merged Type-Forward Assemblies — DONE ✅
 
-**Problem:** After fixing type-forwarding, 236 .NET types still unresolved. The
-forwarding chain leads to assemblies like `System.Collections.dll`. Both our managed
-reference assembly (in Add-Ins, readable by Cecil) and the native R2R runtime version
-(in .NET runtime path, unreadable by Cecil) exist. Cecil resolves to the wrong one.
+**Problem:** After fixing type-forwarding crashes, 236 .NET types still unresolved.
+Root cause: `CecilDotNetTypeLoader.LoadForwardedTypeFromAssembly` silently fails
+when iterating ExportedTypes on assemblies loaded with CecilAssemblyResolver.
+`IsTypeForwardingCircular` is never even called — the failure is upstream.
 
-**Fix options:**
-1. Remove/rename native DLLs in the .NET runtime directory
-2. Patch BC's assembly resolver to prefer Add-Ins
-3. Use custom forwarding targets that only exist in Add-Ins
+**Fix:** Create merged assemblies that define all forwarded types directly (no
+type-forwarding needed). Tool: `tools/MergeNetstandard/` merges 4 assemblies:
+netstandard.dll (2604 forwards), DocumentFormat.OpenXml.dll (91),
+System.Drawing.dll (172), System.Core.dll (248).
+
+**Result:** AL0452 errors 236 → 0. Remaining: 97 member-level errors (AL0132/AL0122)
+from stub types having empty method bodies.
+
+### Remaining: Member-Level Errors (97)
+
+The merged assemblies have correct type definitions but stub method bodies
+(`throw null`). The compiler finds the types but can't find their members
+(properties, methods). Fix: improve the merge tool to copy complete member metadata.
 
 ## Technical Findings
 

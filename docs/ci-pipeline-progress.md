@@ -155,42 +155,68 @@ Decompiled the entire publish chain and analyzed the BCApps CI/CD workflows:
 | `IsRuntimePackage` flag skips compilation | But only for packages with no source code |
 | MS uninstalls ALL apps first | Then publishes from scratch with `-skipVerification -scope Global` |
 
-### Current State: Server-Side Compilation Runs Without Internal Errors
+**12. Patch #15: Merged Type-Forward Assemblies (TYPE RESOLUTION SOLVED)**
 
-The combination of all fixes eliminates all crashes and internal errors:
-- ✅ No more `IsTypeForwardingCircular` NullRef
-- ✅ No more `CheckFileName` empty path exception
-- ✅ No more `InvalidProgramException` from bad IL
-- ✅ No more Watson crash on finalizer thread
-- ✅ No more dependency conflict rejections
+**Root cause discovered:** BC's `CecilDotNetTypeLoader.LoadForwardedTypeFromAssembly`
+silently fails when iterating `ExportedTypes` on assemblies loaded via
+`AssemblyDefinition.ReadAssembly` with `CecilAssemblyResolver` parameters. The
+type-forwarding chain (netstandard → System.Runtime → type definition) never
+completes — `IsTypeForwardingCircular` is **never even called** despite the binary
+patch being correctly applied.
 
-The server-side compiler now runs and produces **normal AL compilation errors**:
-`AL0452: The type 'X' could not be found in assembly 'netstandard'`
+**Debugging journey:**
+- JMP hooks on `GetGlobalAssemblyCacheDirectories` and
+  `GetLocationOfAssembliesLoadedInServerAppDomain` → confirmed they fire but
+  don't solve the issue alone
+- Fixed JMP hook compiled code patching (read StubPrecode `FF 25` format to
+  find the compiled code address behind the precode)
+- Confirmed via reflection diagnostics: the locator finds System.Runtime.dll
+  in Add-Ins (`GetPathToAssembly` returns correct path), Cecil can read it and
+  find System.String, but `LoadType(netstandard, "System.String")` returns NULL
+- Discovered that `IsTypeForwardingCircular` is NEVER called during compilation
+  despite being binary-patched to return false — the issue is upstream
 
-### The ONE Remaining Blocker
+**Solution:** Create **merged assemblies** that define all forwarded types directly
+with stub method bodies (throw null), eliminating the type-forwarding chain entirely.
 
-**236 .NET types cannot be resolved through the type-forwarding chain.**
+| Merged Assembly | Type-Forwards Resolved | Output Size |
+|---|---|---|
+| netstandard-merged.dll | 2604 (from 80 assemblies, incl. 71 nested) | 1.4 MB |
+| DocumentFormat.OpenXml-merged.dll | 91 (from Framework DLL) | 5.9 MB |
+| System.Drawing-merged.dll | 172 | 125 KB |
+| System.Core-merged.dll | 248 | 104 KB |
 
-The forwarding chain: `netstandard → System.Collections → defines List<T>`. Our
-reference assemblies in Add-Ins have the types. But the .NET runtime directory
-(`/usr/share/dotnet/shared/Microsoft.NETCore.App/8.0.25/`) ALSO contains assemblies
-with the same names — these are native/R2R and unreadable by Cecil.
+Tool: `tools/MergeNetstandard/` (uses Mono.Cecil to read source assembly type-forwards,
+find type definitions in target assemblies, and copy them with stub method bodies).
 
-**The problem:** When Cecil follows a type-forward from `netstandard` to
-`System.Collections`, it finds TWO candidates:
-1. Our reference assembly in Add-Ins (managed, readable, has the type) ✅
-2. The runtime's R2R version in the .NET path (native, unreadable) ❌
+**Result:** AL0452 errors **236 → 0**. All .NET types resolve correctly.
 
-Cecil (or BC's assembly resolver) picks the wrong one. The .NET runtime path is
-in the probing list and may take priority over Add-Ins for certain resolution paths.
+**Why this is needed on Linux but not Windows:** On Windows, BC runs on .NET Framework
+where the GAC has managed assemblies and type-forwarding resolution works natively.
+On .NET 8 Linux, the shared framework has R2R (ReadyToRun) native DLLs that Cecil
+can't read, AND `LoadForwardedTypeFromAssembly` fails silently when ExportedTypes
+are accessed on assemblies loaded with CecilAssemblyResolver parameters.
 
-**Solution (not yet implemented):**
-- **Option A**: Remove/rename the native .NET DLLs in the runtime directory so
-  Cecil only finds the reference assemblies in Add-Ins
-- **Option B**: Patch BC's `AssemblyLocatorBase.GetPathToCompatibleAssemblyFromCandidates`
-  to prefer Add-Ins over the runtime path
-- **Option C**: Replace the runtime netstandard.dll with a version that forwards
-  to assembly names that ONLY exist in Add-Ins (custom forwarding targets)
+**Additional fixes in Patch #15:**
+- Added `ColorTranslator`, `PrinterSettings`, `PrinterSettings.StringCollection` to
+  System.Drawing.Common stub (DrawingStub)
+- Framework DLL overrides moved outside setup block (survive container recreate)
+- Entrypoint moved to Dockerfile-independent override pattern
+
+### Current State: 97 Member-Level Errors Remaining
+
+With all type resolution fixed, the server-side compiler finds ALL types but reports
+97 AL0132/AL0122/AL0133 errors — these are **missing members** on stub types:
+
+| Error | Count | Example |
+|---|---|---|
+| AL0132 (missing member) | ~50 | `KeyValuePair<,>` missing `Key`/`Value` properties |
+| AL0122 (type conversion) | ~30 | `DSACryptoServiceProvider` → `AsymmetricAlgorithm` |
+| AL0133 (argument mismatch) | ~15 | `HashAlgorithmName` parameter types |
+| AL0126 (overload) | ~2 | `Graphics.DrawImage` missing overloads |
+
+**Fix:** Improve `tools/MergeNetstandard/` to copy complete member metadata (properties,
+methods with correct signatures, inheritance chains) instead of just type shells.
 
 ---
 
@@ -202,12 +228,14 @@ GitHub Actions Runner (ubuntu-latest, 7GB RAM)
 ├── Builds Docker image (alDirectCompile/StartupHook/Dockerfile)
 │   └── Contains: StartupHook.dll + 6 stubs + libwin32_stubs.so + scripts
 │   └──           + patched CodeAnalysis.dll + patched Mono.Cecil.dll
+│   └──           + 4 merged type-forward assemblies (netstandard, OpenXml, Drawing, Core)
 │   └──           + 163 .NET 8 reference assemblies
 ├── docker compose up -d
 │   ├── sql (SQL Server 2022, healthcheck)
 │   └── bc (entrypoint.sh)
 │       ├── Copies service tier to /bc/service/
 │       ├── Applies binary-patched DLLs
+│       ├── Deploys merged type-forward assemblies to Add-Ins
 │       ├── Renames Add-ins → Add-Ins
 │       ├── Copies .NET reference assemblies to Add-Ins
 │       ├── Clears pre-installed apps from SQL
@@ -218,7 +246,7 @@ GitHub Actions Runner (ubuntu-latest, 7GB RAM)
 └── Workflow: curl to port 7052 (custom API) → run tests → read logEntries
 ```
 
-## All Patches (14 total)
+## All Patches (15 total)
 
 | # | Target DLL | Method | What it does |
 |---|-----------|--------|-------------|
@@ -237,6 +265,7 @@ GitHub Actions Runner (ubuntu-latest, 7GB RAM)
 | 13 | Nav.Watson | `SendReport`, `GetRegistryValue`, `GetWatsonPath` | JMP hooks to no-op + TaskScheduler handler cleanup |
 | 14 | CodeAnalysis | `IsTypeForwardingCircular` | **Binary IL patch** → return false |
 | 14b | Mono.Cecil | `Mixin.CheckFileName` | **Cecil rewrite** → throw BadImageFormatException for empty paths |
+| 15 | netstandard + 3 more | Type-forward assemblies | **Merged assemblies** — resolve type-forwards into direct type definitions |
 
 ## Binary Patch Details
 
@@ -272,18 +301,31 @@ GitHub Actions Runner (ubuntu-latest, 7GB RAM)
 4. **Tiered compilation disabled** — `DOTNET_TieredCompilation=0` prevents Tier 1
    recompilation from overwriting JMP hooks on Watson reporting methods.
 
+5. **Merged type-forward assemblies over runtime patching** — BC's
+   `LoadForwardedTypeFromAssembly` silently fails when iterating ExportedTypes with
+   CecilAssemblyResolver parameters. Rather than patching the opaque failure,
+   we eliminate type-forwarding entirely by merging type definitions into the
+   source assemblies. This is the most reliable approach because it doesn't depend
+   on BC's internal Cecil resolution behavior.
+
 ## Next Steps (Priority Order)
 
-1. **Fix the assembly resolution priority** — Make Cecil prefer reference assemblies
-   in Add-Ins over native DLLs in the .NET runtime path. This is the ONLY remaining
-   blocker for System Application server-side compilation.
+1. **Fix 97 member-level errors (AL0132/AL0122/AL0133)** — Improve the
+   `tools/MergeNetstandard/` merge tool to copy complete member metadata
+   (properties, methods, inheritance chains, generic constraints). Key types:
+   - `KeyValuePair<TKey,TValue>` needs `Key`, `Value` properties
+   - `SortedDictionary<TKey,TValue>` needs `Add` method
+   - Cryptography types need correct inheritance (`DSACryptoServiceProvider : AsymmetricAlgorithm`)
+   - `Graphics` needs `DrawImage` overloads, `Clear` method
+   - `Bitmap` needs `SetResolution`, `Image` needs resolution properties
 
-2. **Publish System Application + Test Library + Tests**
-   - Once type resolution works, publish System Application via dev endpoint
+2. **Publish System Application via dev endpoint**
+   - Once member errors are fixed, server-side compilation should succeed
    - Then publish Test Library and System Application Test
 
-3. **Execute System Application tests and collect timing numbers**
+3. **Execute System Application tests via custom API on port 7052**
+   - Collect timing numbers: Linux headless vs Windows container
 
-4. **Update PipelinePerformanceComparison workflow** with the full fix chain
+4. **Update Dockerfile and entrypoint** to deploy merged assemblies automatically
 
-5. **Reduce ~6 min Win32Exception startup delay** (secondary goal)
+5. **Update PipelinePerformanceComparison workflow** with the full fix chain
