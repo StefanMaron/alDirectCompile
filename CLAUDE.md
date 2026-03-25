@@ -5,24 +5,62 @@
 Execute Business Central AL unit tests on Linux in minutes, not the 45+ minutes
 a full pipeline takes today.
 
-## Two Approaches (Active)
+## Container Infrastructure → MsDyn365Bc.On.Linux
 
-### Approach 1: Headless Service Tier (PRIMARY — nearly working)
+The Docker container infrastructure (Dockerfile, docker-compose, entrypoint,
+stubs, startup hook) has been extracted to a standalone repository:
+
+**https://github.com/StefanMaron/MsDyn365Bc.On.Linux**
+
+That repo provides the general-purpose BC-on-Linux container. This repo
+(alDirectCompile) focuses on the test execution layer on top of it.
+
+## Current Focus: Test Execution via MS Test Framework
+
+The remaining challenge is getting the test runner API to work reliably so
+tests can be executed the same way BcContainerHelper's `Run-TestsInBcContainer`
+does on Windows. Specifically:
+
+- **Page 130455 (Command Line Test Tool)** — the standard automation entry point
+  used by BcContainerHelper. Needs to be registered as a web service and called
+  via SOAP/OData.
+- **Codeunit 130451 (Test Runner - Isol. Disabled)** — the test runner with
+  disabled isolation, used by BCApps CI with `renewClientContextBetweenTests`.
+- **Our TestRunner Extension (codeunit 50003/50004)** — custom API wrapper that
+  uses the MS Test Framework internally. Works locally but fails in CI due to
+  dependency chain issues with server-side compilation.
+
+### What Works Locally (67/173 = 39% pass rate on BCApps System App Tests)
+
+- BC v27.5 boots, compiles, publishes, runs tests
+- MS Test Framework (130451) with disabled isolation
+- Demo data initialization (codeunits 2, 5193, 5691)
+- Per-method result tracking via AL Test Suite tables
+- 11/20 pass rate (55%) for tests that actually execute (rest timeout/hang)
+
+### Blocking Issues
+
+1. **Hanging tests** — ~5 codeunits hang indefinitely (client callback/UI).
+   10-min timeout + BC restart handles this but adds overhead.
+2. **TestRunner Extension server-side compilation** — the custom API extension
+   fails to publish via dev endpoint in CI because its dependency (MS Test
+   Runner) is a source .app that needs server-side compilation, which requires
+   patched CodeAnalysis.dll.
+3. **patched CodeAnalysis.dll not in CI** — the binary patcher tool exists at
+   `/tmp/PatchNetstandard/` locally but isn't in the repo. Need to either check
+   in the tool or the patched DLLs.
+
+## Two Approaches
+
+### Approach 1: Headless Service Tier (PRIMARY)
 Run the real BC service tier on Linux with Docker SQL Server. Patch only the
 Linux-specific blockers via a .NET startup hook. Tests run in the real BC runtime
 with 100% fidelity.
 
-**Status (2026-03-24):** Full CI pipeline GREEN on GitHub Actions for sample
-extensions. BC v27.5 boots, compiles extensions, publishes apps, runs 5 AL tests
-via OData API. BCApps System Application (1264 files) compiles in ~6s locally.
-
-Server-side compilation resolves all .NET types (Patch #15 — merged type-forward
-assemblies). AL0452 (type not found) errors: **236 → 0**. The remaining 97 errors
-are AL0132/AL0122/AL0133 (missing members on stub types in merged assemblies).
-These are fixable by improving the merge tool to copy complete member metadata.
-
-**See `docs/ci-pipeline-progress.md` for detailed session progress.**
-**See `docs/performance-strategy.md` for optimization plans.**
+**Status (2026-03-25):** Full CI pipeline GREEN on GitHub Actions — compiles
+System Application from BCApps source, publishes 9 apps, initializes demo data,
+runs 174 test codeunits. Test execution infrastructure works but test runner
+API needs fixing (see above).
 
 ```
 Docker SQL Server 2022 (CRONUS database)
@@ -49,11 +87,10 @@ Key files:
 - `StartupHook/HttpSysStub/` — Microsoft.AspNetCore.Server.HttpSys stub (redirects to Kestrel)
 - `StartupHook/AclStub/` — (unused — ACL bypass done via topology proxy)
 - `tools/MergeNetstandard/` — Tool to merge type-forward assemblies (Patch #15)
+- `TestRunnerExtension/` — Custom test runner API (wraps MS Test Framework 130451)
 - `docker-compose.yml` — Docker orchestration (BC + SQL Server 2022)
-- `scripts/setup-sql.sh` — CRONUS database restore
-- `scripts/entrypoint.sh` — Container entrypoint (applies patches, clears apps, starts BC)
-- `docs/headless-service-tier.md` — Architecture, decisions, progress
-- `docs/headless-decision-history.md` — Why this approach was chosen
+- `scripts/entrypoint.sh` — Container entrypoint (applies patches, starts BC)
+- `scripts/run-system-tests.sh` — Runs BCApps System Application test suite
 - `docs/ci-pipeline-progress.md` — Detailed session-by-session progress
 
 ### Approach 2: Standalone Transpiler (ALRunner — paused)
@@ -75,13 +112,18 @@ StartupHook/           — Headless service tier patches (Approach 1)
   ├── Dockerfile
   ├── kernel32_stubs.c
   ├── patched/            — Binary-patched DLLs + merged assemblies (not in git)
-  ├── refasm/             — .NET 8 reference assemblies (not in git, see below)
+  ├── refasm/             — .NET 8 reference assemblies (not in git)
   ├── GenevaStub/         — Geneva ETW exporter stub
   ├── DrawingStub/        — System.Drawing.Common stub
   ├── PerfCounterStub/    — PerformanceCounter stub
   ├── WindowsPrincipalStub/ — WindowsIdentity/SecurityIdentifier stub
   ├── HttpSysStub/        — HttpSys→Kestrel redirect stub
   └── AclStub/            — (unused)
+TestRunnerExtension/   — Custom test runner API
+  ├── app.json           — Depends on MS Test Runner (130451)
+  ├── src/TestSuiteRunner.Codeunit.al  — Wraps AL Test Suite infrastructure
+  ├── src/RunnerTable.al  — API page for test execution
+  └── TestRunner.app      — Compiled extension
 AlRunner/              — Standalone transpiler (Approach 2)
   ├── Program.cs
   ├── RoslynRewriter.cs
@@ -90,17 +132,15 @@ tools/
   └── MergeNetstandard/  — Merge tool for type-forward assemblies (Patch #15)
 docker-compose.yml     — Docker orchestration
 scripts/
-  ├── setup-sql.sh     — CRONUS database restore
-  └── entrypoint.sh    — BC container entrypoint
-BaseApp/               — Spike test source
-TestApp/               — Spike test source
-artifacts/             — BC platform artifacts (not checked in)
+  ├── entrypoint.sh    — BC container entrypoint
+  ├── download-artifacts.sh — BC artifact downloader with version resolution
+  └── run-system-tests.sh  — BCApps test suite runner
 docs/
   ├── headless-service-tier.md
   ├── headless-decision-history.md
   ├── ci-pipeline-progress.md
   ├── performance-strategy.md
-  ├── runtime-analysis.md
+  ├── copilot-integration-pitch.md
   └── feature-compatibility-matrix.md
 ```
 
@@ -144,6 +184,7 @@ type-forwarding resolution without the R2R/native format that crashes Cecil.
 - **Decompiler**: `ilspycmd` (for investigating BC DLLs)
 - **Docker**: For SQL Server 2022 container + BC service tier
 - **MockTest.dll**: From `artifacts/onprem/.../platform/Test Assemblies/Mock Assemblies/`
+- **Container repo**: https://github.com/StefanMaron/MsDyn365Bc.On.Linux
 
 ### Downloading BC Artifacts
 
